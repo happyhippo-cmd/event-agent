@@ -1,0 +1,227 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    background: #ffffff;
+    color: #111111;
+    font-family: 'Pretendard', sans-serif;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+}
+
+/* ====== 캐러셀 카드 (Tailwind 만으로는 표현 어려운 동적 스타일은 inline style 사용) ====== */
+@layer components {
+  .kd-album-card {
+    @apply absolute overflow-hidden rounded-[18px] cursor-pointer select-none bg-surface;
+    will-change: transform, opacity;
+    transition:
+      transform var(--kd-card-duration, 560ms) var(--kd-card-easing, cubic-bezier(0.22, 1, 0.36, 1)),
+      opacity 0.24s,
+      box-shadow 0.3s,
+      filter 0.3s;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.1);
+  }
+  .kd-album-card.pos-front {
+    box-shadow:
+      0 20px 56px rgba(0, 0, 0, 0.2),
+      0 0 0 2px rgba(255, 255, 255, 0.6),
+      0 0 28px rgba(255, 255, 255, 0.72),
+      0 0 58px rgba(255, 255, 255, 0.42);
+    z-index: 10;
+  }
+  .kd-album-card img {
+    @apply absolute inset-0 w-full h-full object-cover block pointer-events-none;
+    z-index: 2;
+  }
+  .kd-album-cover {
+    @apply absolute inset-0 pointer-events-none;
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    z-index: 1;
+  }
+  .kd-card-fallback {
+    @apply absolute inset-0 w-full h-full flex flex-col items-center justify-center gap-[10px];
+    background: linear-gradient(145deg, #e2e2e8, #c8c8d2);
+    z-index: 1;
+  }
+  .kd-card-overlay {
+    @apply absolute bottom-0 left-0 right-0 px-4 pb-[14px] pt-4 flex flex-col justify-end pointer-events-none;
+    height: 48%;
+    z-index: 4;
+    background: linear-gradient(to top, rgba(0, 0, 0, 0.78) 0%, transparent 100%);
+    border-radius: 0 0 18px 18px;
+  }
+
+  /* Waveform bar */
+  .kd-wave-bar {
+    flex: 0 0 1px;
+    width: 1px;
+    height: 10px;
+    border-radius: 999px;
+    background: #d8e2ea;
+    opacity: 0.9;
+    transform-origin: center;
+    transition:
+      background 0.16s ease,
+      opacity 0.16s ease,
+      box-shadow 0.16s ease;
+  }
+  .kd-wave-bar.active {
+    background: #00a8e8;
+    opacity: 1;
+  }
+  .kd-wave-bar.current {
+    background: #00a8e8;
+    box-shadow: 0 0 8px rgba(0, 168, 232, 0.34);
+  }
+
+  /* Spotify hidden controller pool */
+  .kd-spotify-pool {
+    position: fixed;
+    left: -1200px;
+    top: 0;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .kd-spotify-host {
+    width: 300px;
+    height: 80px;
+  }
+  .kd-spotify-host iframe {
+    display: block;
+    width: 100% !important;
+    height: 100% !important;
+    border: 0;
+  }
+
+  /* Surfy 메시지 아바타 (Tailwind로 표현 까다로운 멀티 box-shadow는 보존) */
+  .kd-surfy-avatar {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #00a8e8, #006fe8);
+    flex: 0 0 auto;
+    position: relative;
+  }
+  .kd-surfy-avatar::before {
+    content: '';
+    position: absolute;
+    left: 9px;
+    top: 16px;
+    width: 16px;
+    height: 3px;
+    border-radius: 999px;
+    background: #fff;
+    transform: rotate(-35deg);
+  }
+
+  /* Food card 확장 애니메이션 */
+  .kd-food-card-detail {
+    max-height: 0;
+    opacity: 0;
+    margin: 0 18px;
+    overflow: hidden;
+    border-top: 1px solid transparent;
+    transform: translateY(-4px);
+    transition:
+      max-height 0.32s cubic-bezier(0.22, 1, 0.36, 1),
+      opacity 0.2s ease,
+      padding-top 0.24s ease,
+      margin-bottom 0.24s ease,
+      border-color 0.2s ease,
+      transform 0.24s ease;
+  }
+  .kd-food-card.active .kd-food-card-detail {
+    max-height: 160px;
+    opacity: 1;
+    margin-bottom: 16px;
+    padding-top: 12px;
+    border-top-color: rgba(0, 0, 0, 0.08);
+    transform: translateY(0);
+  }
+  .kd-food-card {
+    transition:
+      min-height 0.32s cubic-bezier(0.22, 1, 0.36, 1),
+      border-color 0.2s,
+      background 0.2s;
+  }
+  .kd-food-card.active {
+    min-height: 244px;
+  }
+
+  /* Transition overlay */
+  .kd-transition-overlay {
+    position: fixed;
+    inset: 0;
+    background: #00a8e8;
+    z-index: 1000;
+    transform: translateY(100%);
+    transition: transform 0.5s cubic-bezier(0.76, 0, 0.24, 1);
+  }
+  .kd-transition-overlay.entering {
+    transform: translateY(0);
+  }
+  .kd-transition-overlay.leaving {
+    transform: translateY(-100%);
+  }
+
+  /* Surfy thinking 애니메이션 */
+  @keyframes kdSurfyThinking {
+    from {
+      opacity: 0.56;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  .kd-surfy-loading {
+    animation: kdSurfyThinking 1.1s ease-in-out infinite alternate;
+    color: #888888;
+  }
+
+  /* place-strip overflow on mobile */
+  .kd-place-strip::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* food-list scrollbar */
+  .kd-food-list {
+    scrollbar-color: #c9c9cf transparent;
+  }
+  .kd-food-list::-webkit-scrollbar {
+    width: 6px;
+  }
+  .kd-food-list::-webkit-scrollbar-thumb {
+    background: #c9c9cf;
+    border-radius: 999px;
+  }
+
+  /* history grid scrollbar */
+  .kd-history-scroll {
+    scrollbar-color: #d2d2d2 transparent;
+  }
+  .kd-history-scroll::-webkit-scrollbar {
+    width: 14px;
+  }
+  .kd-history-scroll::-webkit-scrollbar-thumb {
+    background: #d2d2d2;
+    border-radius: 999px;
+  }
+}

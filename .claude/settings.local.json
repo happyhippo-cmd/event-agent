@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python manage.py shell -c \"from events.models import Event; print\\(Event.objects.count\\(\\)\\)\")",
+      "Bash(python3 manage.py shell -c \"from events.models import Event; print\\(Event.objects.count\\(\\)\\)\")",
+      "Bash(pip3 install *)",
+      "Bash(python3 manage.py makemigrations)",
+      "Bash(python3 manage.py migrate)",
+      "Bash(python3 manage.py import_events --file popup_stores_hierarchical_tagged.csv --clear)",
+      "Bash(python3 manage.py shell -c ' *)",
+      "Bash(python3 manage.py import_events --file ../popup_stores_tagged_v2.csv)"
+    ]
+  }
+}

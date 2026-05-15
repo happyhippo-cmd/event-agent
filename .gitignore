@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+venv/
+.venv/
+
+# Django
+*.sqlite3
+local_settings.py
+
+# IDE
+.vscode/
+.idea/

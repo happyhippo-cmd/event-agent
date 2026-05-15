@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:dayforyou.com)",
+      "Bash(curl -sk --max-time 10 \"https://dayforyou.com/\")",
+      "Bash(curl -sk --max-time 10 \"https://dayforyou.com/getScheduleList\")",
+      "Bash(python3 -c \"import requests, bs4; print\\('OK'\\)\")",
+      "Bash(python3 crawler.py --limit 5)",
+      "Bash(python3 -c \"import json; data=json.load\\(open\\('popup_stores.json'\\)\\); [print\\(json.dumps\\(d, ensure_ascii=False, indent=2\\)\\) for d in data]\")",
+      "Bash(curl -sk --max-time 10 \"https://dayforyou.com/getScheduleList?keyword=서울\")",
+      "Bash(python3 crawler.py --region 서울)",
+      "Bash(python3 crawler.py --region 서울 --detail --delay 0.2)",
+      "Bash(python3 -c ' *)",
+      "Bash(ls /Users/daunk/Downloads/lucky/)",
+      "Read(//Users/daunk/Downloads/lucky/**)",
+      "Bash(python3 -m django --version)",
+      "Bash(python3 -c \"import psycopg2; print\\('psycopg2 OK'\\)\")",
+      "Bash(pip3 install *)",
+      "Bash(mkdir -p /Users/daunk/Downloads/lucky/backend)",
+      "Bash(django-admin startproject *)",
+      "Bash(python3 manage.py startapp events)",
+      "Bash(python3 manage.py makemigrations)",
+      "Bash(python3 manage.py migrate)",
+      "Bash(python3 manage.py import_events --file ../데이포유/popup_stores.csv)",
+      "Bash(python3 manage.py check)",
+      "Bash(python3 manage.py shell -c ' *)"
+    ],
+    "additionalDirectories": [
+      "/Users/daunk/Downloads/lucky/backend/config",
+      "/Users/daunk/Downloads/lucky/backend/events",
+      "/Users/daunk/Downloads/lucky/backend"
+    ]
+  }
+}

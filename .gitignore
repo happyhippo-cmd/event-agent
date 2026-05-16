@@ -1,0 +1,38 @@
+# ===== macOS =====
+.DS_Store
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ===== 가상환경 =====
+.venv/
+venv/
+env/
+ENV/
+
+# ===== 환경변수 (절대 커밋 금지) =====
+.env
+.env.local
+*.env
+
+# .env.example 은 예시 파일이라 커밋 허용
+!.env.example
+
+# ===== IDE =====
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ===== 작업용 임시 파일 =====
+PR_*.md

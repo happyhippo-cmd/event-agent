@@ -6,3 +6,12 @@ django-cors-headers>=4.3
 psycopg2-binary>=2.9
 gunicorn>=22.0
 python-dotenv>=1.0
+
+# LangChain / LangGraph (Supervisor Agent)
+langchain>=0.2.0
+langchain-openai>=0.1.0
+langchain-core>=0.2.0
+langgraph>=0.1.0
+openai>=1.30.0
+pydantic>=2.0.0
+typing-extensions>=4.9.0

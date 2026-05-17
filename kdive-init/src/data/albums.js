@@ -111,6 +111,8 @@ export const MUST_VISIT_PLACES = [
 
 export const FOOD_TYPES = ['로컬 한식집', '브런치 카페', '분식 스팟', '디저트 바', '야식 맛집'];
 export const FOOD_RESULT_LIMIT = 5;
+export const MIN_TRACK_SELECTION = 3;
+export const MIN_PLACE_SELECTION = 3;
 export const PLAYBACK_DURATION_MS = 30000;
 export const VISIBLE_EDGE = 5;
 export const VISIBLE_OFFSETS = Array.from({ length: VISIBLE_EDGE * 2 + 1 }, (_, i) => i - VISIBLE_EDGE);
@@ -140,4 +142,8 @@ export function createFoodSuggestionsForPlace(album, place) {
 
 export function getPlaceKey(albumId, placeName) {
   return `${albumId}::${placeName}`;
+}
+
+export function getPlaceSelectionKey(albumId, place) {
+  return place?.key || getPlaceKey(albumId, place?.name || '');
 }

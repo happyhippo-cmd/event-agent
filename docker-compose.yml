@@ -38,6 +38,8 @@ services:
       context: ./surfy-backend
       dockerfile: Dockerfile
     container_name: surfy-backend
+    env_file:
+      - ./surfy-backend/.env
     ports:
       - "8000:8000"
     environment:

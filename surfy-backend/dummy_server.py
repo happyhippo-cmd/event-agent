@@ -10,6 +10,7 @@ Dockerfile CMD 가 자동으로 runserver 로 전환됩니다.
 
 import json
 import os
+import re
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -25,9 +26,44 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 STATUS_MESSAGES = [
     "Supervisor가 사용자의 입력에서 취향과 의도를 분석하고 있어요.",
-    "Foodie Agent를 불러올게요.",
-    "Foodie Agent가 사용자 맞춤 장소를 선정하고 있어요.",
+    "필요한 전문 Agent를 불러올게요.",
+    "Agent가 사용자 맞춤 장소를 선정하고 있어요.",
 ]
+
+LOCATION_HINTS = (
+    "강남", "서초", "홍대", "연남", "합정", "망원", "성수", "압구정", "신사",
+    "이태원", "한남", "을지로", "종로", "명동", "성북", "잠실", "여의도",
+)
+FOOD_CATEGORY_HINTS = {
+    "카페": ("카페", "커피", "브런치", "디저트", "찻집", "베이커리"),
+    "한식": ("한식", "백반", "국밥", "찌개"),
+    "일식": ("일식", "라멘", "우동", "돈까스", "초밥", "스시"),
+    "중식": ("중식", "짜장", "짬뽕", "마라"),
+    "양식": ("양식", "파스타", "피자", "스테이크"),
+    "분식": ("분식", "떡볶이", "김밥"),
+}
+FOOD_INTENT_HINTS = tuple(
+    dict.fromkeys(["맛집", "식당", "밥", "먹", *[item for hints in FOOD_CATEGORY_HINTS.values() for item in hints]])
+)
+TOUR_INTENT_HINTS = (
+    "관광", "관광지", "여행지", "명소", "가볼만", "구경", "산책", "박물관",
+    "미술관", "공원", "야경", "볼거리",
+)
+EVENT_INTENT_HINTS = (
+    "전시", "전시회", "팝업", "이벤트", "공연", "콘서트", "페스티벌", "행사", "아트페어",
+)
+MOOD_HINTS = {
+    "조용한": ("조용", "차분"),
+    "로컬 느낌": ("로컬", "동네", "개인", "독립", "숨은"),
+    "감성적인": ("감성", "분위기"),
+    "혼자": ("혼자", "혼밥", "혼카페"),
+}
+CHAIN_EXCLUDE_HINTS = (
+    "체인", "프랜차이즈", "스타벅스", "커피빈", "투썸", "이디야", "메가커피",
+    "컴포즈", "빽다방", "할리스", "폴바셋", "파스쿠찌",
+)
+LOCATION_PATTERN = re.compile(r"([가-힣A-Za-z0-9]+)\s*(?:에서|근처|주변|쪽|역)")
+NEARBY_LOCATION_PATTERN = re.compile(r"([가-힣A-Za-z0-9]+)\s*(?:근처|주변|쪽)")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -56,7 +92,8 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def do_POST(self):  # noqa: N802
-        if self.path.rstrip("/") == "/api/chat":
+        route = self.path.rstrip("/")
+        if route in ("/api/chat", "/api/onboarding/places", "/api/onboarding/foods"):
             length = int(self.headers.get("Content-Length", "0") or 0)
             try:
                 raw = self.rfile.read(length).decode("utf-8") if length else "{}"
@@ -66,7 +103,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             try:
-                payload = run_chat_pipeline(data)
+                if route == "/api/onboarding/places":
+                    payload = run_onboarding_places(data)
+                elif route == "/api/onboarding/foods":
+                    payload = run_onboarding_foods(data)
+                else:
+                    payload = run_chat_pipeline(data)
             except Exception as exc:
                 self._send_json(
                     500,
@@ -92,12 +134,38 @@ def main():
     HTTPServer((HOST, PORT), Handler).serve_forever()
 
 
+def run_onboarding_places(payload):
+    from apps.agents.workers.tour.agent import recommend_places_for_music_keywords
+
+    tracks = payload.get("tracks") or []
+    result = recommend_places_for_music_keywords(
+        tracks=tracks,
+        per_keyword=int(payload.get("per_keyword") or 3),
+        fixed_count=int(payload.get("fixed_count") or 2),
+    )
+    return result
+
+
+def run_onboarding_foods(payload):
+    from apps.agents.workers.foodie.agent import recommend_nearby_foods_for_places
+
+    places = payload.get("places") or []
+    return recommend_nearby_foods_for_places(
+        places=places,
+        limit=int(payload.get("limit") or 5),
+        radius_km=float(payload.get("radius_km") or 2.0),
+    )
+
+
 def run_chat_pipeline(payload):
-    from apps.agents.state import AGENT_FOODIE
+    from apps.agents.state import AGENT_EVENT, AGENT_FOODIE, AGENT_TOURIST
     from apps.agents.supervisor import supervisor_intake
-    from apps.agents.workers.foodie import run_foodie_agent_for_state
 
     user_message = str(payload.get("message") or "").strip()
+    effective_message = _contextualize_followup(
+        user_message=user_message,
+        history=payload.get("history") or [],
+    )
     user_context = payload.get("user_context") or {}
     if not user_message:
         return {
@@ -109,10 +177,18 @@ def run_chat_pipeline(payload):
         }
 
     state = {
-        "user_utterance": user_message,
+        "user_utterance": effective_message,
         "onboarding_data": _build_onboarding_data(user_context),
     }
     result_state = supervisor_intake(state)
+    result_state = _apply_deterministic_taste_hints(
+        result_state=result_state,
+        user_message=effective_message,
+        event_agent=AGENT_EVENT,
+        foodie_agent=AGENT_FOODIE,
+        tourist_agent=AGENT_TOURIST,
+    )
+    result_state = _apply_user_context_to_taste(result_state, user_context)
 
     if result_state.get("needs_user_clarification"):
         question = result_state.get("clarification_question") or "조금 더 구체적으로 알려주실래요?"
@@ -128,28 +204,51 @@ def run_chat_pipeline(payload):
             "status_messages": STATUS_MESSAGES[:1],
         }
 
-    if AGENT_FOODIE in result_state.get("target_agents", []):
-        result_state = run_foodie_agent_for_state(result_state, top_k=3)
+    target_agents = result_state.get("target_agents", [])
+    agent_results = {}
+    recommendations = []
+
+    if AGENT_FOODIE in target_agents:
+        result_state = _run_foodie_agent(result_state, top_k=3)
         foodie_result = result_state.get("foodie_result") or {}
-        recommendations = foodie_result.get("candidates") or []
+        agent_results["foodie"] = foodie_result
+        recommendations.extend(_format_foodie_recommendations(foodie_result))
+
+    if AGENT_EVENT in target_agents:
+        event_result = _run_event_agent(effective_message)
+        result_state["event_result"] = event_result
+        agent_results["event"] = event_result
+
+    if AGENT_TOURIST in target_agents:
+        tour_result = _run_tour_agent(effective_message)
+        result_state["tourist_result"] = tour_result
+        agent_results["tourist"] = tour_result
+        recommendations.extend(_format_tour_recommendations(tour_result))
+
+    if recommendations:
+        recommendations = recommendations[:3]
         return {
-            "response": _build_foodie_response(foodie_result),
+            "response": _build_recommendation_response(
+                recommendations,
+                target_agents,
+                result_state.get("taste_context", {}),
+            ),
             "route_decision": {
-                "target_agents": result_state.get("target_agents", []),
+                "target_agents": target_agents,
                 "taste_context": result_state.get("taste_context", {}),
             },
-            "agent_results": {"foodie": foodie_result},
-            "recommendations": recommendations[:3],
+            "agent_results": agent_results,
+            "recommendations": recommendations,
             "status_messages": STATUS_MESSAGES,
         }
 
     return {
-        "response": "지금 prototype에서는 Foodie Agent 추천만 연결되어 있어요. 맛집이나 카페 요청으로 다시 물어봐 주세요.",
+        "response": _build_no_result_response(target_agents, agent_results),
         "route_decision": {
-            "target_agents": result_state.get("target_agents", []),
+            "target_agents": target_agents,
             "taste_context": result_state.get("taste_context", {}),
         },
-        "agent_results": {},
+        "agent_results": agent_results,
         "recommendations": [],
         "status_messages": STATUS_MESSAGES[:1],
     }
@@ -180,6 +279,176 @@ def _build_onboarding_data(user_context):
     }
 
 
+def _apply_deterministic_taste_hints(result_state, user_message, event_agent, foodie_agent, tourist_agent):
+    state = dict(result_state)
+    taste_context = dict(state.get("taste_context") or {})
+    target_agents = list(state.get("target_agents") or [])
+
+    food_categories = _detect_food_categories(user_message)
+    locations = _detect_locations(user_message)
+    nearby_locations = _detect_nearby_locations(user_message)
+    moods = _detect_moods(user_message)
+    suppressed = _detect_suppressed_keywords(user_message)
+    is_food_request = bool(food_categories) or any(hint in user_message for hint in FOOD_INTENT_HINTS)
+    is_event_request = any(hint in user_message for hint in EVENT_INTENT_HINTS)
+    is_tour_request = any(hint in user_message for hint in TOUR_INTENT_HINTS)
+    if is_food_request and not _has_explicit_tour_intent(user_message):
+        is_tour_request = False
+    if is_event_request and not _has_explicit_tour_intent(user_message):
+        is_tour_request = False
+    if not is_tour_request and (is_food_request or is_event_request):
+        target_agents = [agent for agent in target_agents if agent != tourist_agent]
+
+    if is_food_request:
+        _append_unique(target_agents, foodie_agent)
+    if is_event_request:
+        _append_unique(target_agents, event_agent)
+    if is_tour_request:
+        _append_unique(target_agents, tourist_agent)
+
+    _extend_taste_context(taste_context, "location_keywords", locations)
+    _extend_taste_context(taste_context, "nearby_place_keywords", nearby_locations)
+    _extend_taste_context(taste_context, "event_type_keywords", _detect_event_types(user_message))
+    _extend_taste_context(taste_context, "food_type_keywords", food_categories)
+    _extend_taste_context(taste_context, "place_type_keywords", food_categories)
+    _extend_taste_context(taste_context, "mood_keywords", moods)
+    _extend_taste_context(taste_context, "current_mood_keywords", moods)
+    _extend_taste_context(taste_context, "suppressed_keywords", suppressed)
+    _extend_taste_context(
+        taste_context,
+        "current_keywords",
+        [*locations, *nearby_locations, *food_categories, *moods, *suppressed],
+    )
+
+    if target_agents:
+        state["target_agents"] = target_agents
+    if taste_context:
+        state["taste_context"] = taste_context
+
+    if (
+        state.get("needs_user_clarification")
+        and (is_food_request or is_event_request or is_tour_request)
+        and target_agents
+    ):
+        state["needs_user_clarification"] = False
+        state.pop("clarification_question", None)
+        state.pop("clarification_type", None)
+
+    return state
+
+
+def _apply_user_context_to_taste(result_state, user_context):
+    state = dict(result_state)
+    taste_context = dict(state.get("taste_context") or {})
+    extras = user_context.get("extras") or {}
+    nickname = (
+        user_context.get("nickname")
+        or user_context.get("user_nickname")
+        or user_context.get("display_name")
+        or extras.get("nickname")
+        or extras.get("user_nickname")
+        or extras.get("display_name")
+    )
+    if nickname:
+        taste_context["nickname"] = nickname
+        state["taste_context"] = taste_context
+    return state
+
+
+def _detect_locations(user_message):
+    locations = []
+    for match in LOCATION_PATTERN.finditer(user_message):
+        location = match.group(1).strip()
+        if 1 < len(location) <= 8:
+            locations.append(location)
+    locations.extend(location for location in LOCATION_HINTS if location in user_message)
+    return list(dict.fromkeys(locations))
+
+
+def _detect_nearby_locations(user_message):
+    locations = []
+    for match in NEARBY_LOCATION_PATTERN.finditer(user_message):
+        location = match.group(1).strip()
+        if 1 < len(location) <= 12:
+            locations.append(location)
+    return list(dict.fromkeys(locations))
+
+
+def _detect_event_types(user_message):
+    return [hint for hint in EVENT_INTENT_HINTS if hint in user_message]
+
+
+def _has_explicit_tour_intent(user_message):
+    explicit_terms = (
+        "관광", "관광지", "여행지", "명소", "가볼만", "구경", "산책",
+        "박물관", "미술관", "공원", "야경",
+    )
+    return any(term in user_message for term in explicit_terms)
+
+
+def _detect_food_categories(user_message):
+    categories = []
+    for category, hints in FOOD_CATEGORY_HINTS.items():
+        if any(hint in user_message for hint in hints):
+            categories.append(category)
+    if any(brand in user_message for brand in ("스타벅스", "커피빈", "투썸", "이디야", "메가커피", "컴포즈", "빽다방", "할리스")):
+        categories.append("카페")
+    return list(dict.fromkeys(categories))
+
+
+def _detect_moods(user_message):
+    moods = []
+    for mood, hints in MOOD_HINTS.items():
+        if any(hint in user_message for hint in hints):
+            moods.append(mood)
+    return list(dict.fromkeys(moods))
+
+
+def _detect_suppressed_keywords(user_message):
+    suppressed = [hint for hint in CHAIN_EXCLUDE_HINTS if hint in user_message]
+    if any(hint in user_message for hint in ("로컬", "동네", "개인", "독립", "숨은")):
+        suppressed.append("체인")
+    return list(dict.fromkeys(suppressed))
+
+
+def _extend_taste_context(taste_context, key, values):
+    if not values:
+        return
+    current = taste_context.get(key)
+    if not isinstance(current, list):
+        current = [current] if current else []
+    for value in values:
+        _append_unique(current, value)
+    taste_context[key] = current
+
+
+def _append_unique(items, value):
+    if value and value not in items:
+        items.append(value)
+
+
+def _contextualize_followup(user_message, history):
+    if not _looks_like_followup(user_message):
+        return user_message
+
+    previous_user_messages = [
+        item.get("content", "")
+        for item in history
+        if item.get("role") == "user" and item.get("content")
+    ]
+    if not previous_user_messages:
+        return user_message
+
+    return f"{previous_user_messages[-1]}\n추가 조건: {user_message}"
+
+
+def _looks_like_followup(user_message):
+    return any(
+        marker in user_message
+        for marker in ("말고", "다른", "그거", "저거", "거기", "체인", "프랜차이즈", "스타벅스", "커피빈")
+    )
+
+
 def _extract_names(items):
     names = []
     for item in items:
@@ -199,14 +468,284 @@ def _name_from_key(key):
     return parts[0] if parts else ""
 
 
-def _build_foodie_response(foodie_result):
+def _run_foodie_agent(result_state, top_k):
+    from apps.agents.workers.foodie import run_foodie_agent_for_state
+    from apps.agents.workers.foodie.agent import run_nearby_foodie_agent
+
+    anchors = _resolve_nearby_anchors(result_state.get("taste_context", {}))
+    if anchors:
+        result_state = dict(result_state)
+        result_state["foodie_result"] = run_nearby_foodie_agent(
+            anchors=anchors,
+            taste_context=result_state.get("taste_context", {}),
+            top_k=top_k,
+            radius_km=2.0,
+        )
+        return result_state
+    return run_foodie_agent_for_state(result_state, top_k=top_k)
+
+
+def _resolve_nearby_anchors(taste_context):
+    anchor_names = list(taste_context.get("nearby_place_keywords") or [])
+    if not anchor_names:
+        return []
+
+    from apps.agents.workers.tour.agent import get_location_from_db, get_location_from_kakao
+
+    anchors = []
+    for name in anchor_names:
+        coord = get_location_from_db(name)
+        if not coord.get("found"):
+            coord = get_location_from_db(str(name).replace(" ", ""))
+        if not coord.get("found"):
+            coord = get_location_from_kakao(name)
+        if coord.get("found"):
+            anchors.append(
+                {
+                    "name": name,
+                    "lat": coord.get("latitude"),
+                    "lng": coord.get("longitude"),
+                }
+            )
+    return anchors
+
+
+def _run_event_agent(user_message):
+    return {
+        "status": "not_configured",
+        "message": (
+            "전시/팝업/공연처럼 현재 열리는 이벤트는 아직 Event Agent 데이터가 연결되지 않았어요. "
+            "실시간 전시 추천은 Event Agent를 붙인 뒤에 정확히 제공할 수 있습니다."
+        ),
+        "query": user_message,
+        "recommended_events": [],
+    }
+
+
+def _run_tour_agent(user_message):
+    try:
+        from apps.agents.workers.tour.agent import run as run_tour_agent
+
+        result = run_tour_agent(user_message, radius_km=3.0)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "message": f"Tour Agent 실행 중 오류가 발생했어요: {exc}",
+            "recommended_places": [],
+        }
+
+    if result.get("error"):
+        return {
+            "status": "error",
+            "message": result["error"],
+            "recommended_places": [],
+            "raw": result,
+        }
+    return {
+        "status": "ok",
+        "message": "",
+        **result,
+    }
+
+
+def _format_foodie_recommendations(foodie_result):
     status = foodie_result.get("status")
     candidates = foodie_result.get("candidates") or []
     if status != "ok" or not candidates:
-        return foodie_result.get("message") or "조건에 맞는 Foodie 추천을 찾지 못했어요."
+        return []
 
-    names = ", ".join(candidate["name"] for candidate in candidates[:3])
-    return f"좋아요. 취향 태그가 잘 맞는 장소 3곳을 골랐어요: {names}"
+    return [
+        {
+            "source_agent": "foodie",
+            "id": candidate.get("kakao_place_id"),
+            "name": candidate.get("name"),
+            "category": candidate.get("category"),
+            "area": candidate.get("gu"),
+            "address": candidate.get("address"),
+            "photo_url": _first_present(candidate, ("photo_url", "image_url", "firstimage", "firstimage2")),
+            "photo_urls": _photo_urls(candidate),
+            "rating": candidate.get("rating"),
+            "review_count": candidate.get("review_count"),
+            "matched_preferences": candidate.get("matched_preferences", []),
+            "ranking_basis": candidate.get("ranking_basis", ""),
+            "curation": candidate.get("curation") or candidate.get("ranking_basis", ""),
+        }
+        for candidate in candidates[:3]
+    ]
+
+
+def _format_tour_recommendations(tour_result):
+    if tour_result.get("status") != "ok":
+        return []
+
+    reason = tour_result.get("llm_selection_reason") or ""
+    recommendations = []
+    for place in (tour_result.get("recommended_places") or [])[:3]:
+        name = place.get("place_name") or place.get("name")
+        category = place.get("category_name") or "관광지"
+        address = place.get("road_address_name") or place.get("address_name") or place.get("address")
+        distance = place.get("distance_km")
+        photo_url = _first_present(place, ("firstimage", "firstimage2", "photo_url", "image_url"))
+        curation = _build_tour_curation(name, category, distance, reason, place.get("overview"))
+        recommendations.append(
+            {
+                "source_agent": "tourist",
+                "id": place.get("id") or name,
+                "name": name,
+                "category": category,
+                "area": tour_result.get("current_location"),
+                "address": address,
+                "photo_url": photo_url,
+                "photo_urls": _photo_urls(place),
+                "distance_km": distance,
+                "matched_preferences": tour_result.get("preferences", []),
+                "ranking_basis": reason,
+                "curation": curation,
+            }
+        )
+    return recommendations
+
+
+def _first_present(data, keys):
+    for key in keys:
+        value = data.get(key)
+        if value:
+            return value
+    return None
+
+
+def _photo_urls(data):
+    urls = []
+    for key in ("photo_url", "image_url", "firstimage", "firstimage2"):
+        value = data.get(key)
+        if value and value not in urls:
+            urls.append(value)
+    return urls
+
+
+def _build_tour_curation(name, category, distance, reason, overview):
+    if not name:
+        name = "이 장소"
+    subject = _subject_phrase(name)
+    category_label = _tour_category_label(category)
+    distance_text = f" 기준 위치에서 약 {distance}km 거리라" if distance is not None else ""
+    overview_text = (overview or "").strip()
+    if overview_text:
+        overview_text = overview_text[:80]
+    if reason:
+        return f"{subject} {category_label}로,{distance_text} 요청한 동선에 넣기 좋아요. {reason}"
+    if overview_text:
+        return f"{subject} {category_label}로,{distance_text} {overview_text}"
+    return f"{subject} {category_label}로,{distance_text} Surfy가 고른 관광지 추천이에요."
+
+
+def _subject_phrase(text):
+    last = text[-1] if text else ""
+    if "가" <= last <= "힣" and (ord(last) - ord("가")) % 28:
+        return f"{text}은"
+    return f"{text}는"
+
+
+def _tour_category_label(category):
+    text = str(category or "").strip()
+    if not text or text == "관광지":
+        return "관광지"
+    if "고궁" in text:
+        return "고궁 명소"
+    if "문화유적" in text:
+        return "역사 명소"
+    if "테마거리" in text:
+        return "거리 명소"
+    if "전망대" in text:
+        return "전망 명소"
+    if "공원" in text:
+        return "공원"
+    return text.split(">")[-1].strip() or "관광지"
+
+
+def _build_recommendation_response(recommendations, target_agents, taste_context=None):
+    names = ", ".join(item["name"] for item in recommendations if item.get("name"))
+    if "foodie" in target_agents and "tourist" in target_agents:
+        return f"좋아요. 맛집과 관광지를 함께 보고 어울리는 장소 3곳을 골랐어요: {names}"
+    if "tourist" in target_agents:
+        return f"좋아요. 지금 요청에 맞는 관광지 3곳을 골랐어요: {names}"
+    return f"좋아요. {_foodie_taste_intro(taste_context or {})} 3군데를 가져왔어요: {names}"
+
+
+def _foodie_taste_intro(taste_context):
+    food_types = _list_taste_terms(taste_context, ("food_type_keywords", "place_type_keywords"))
+    moods = _list_taste_terms(taste_context, ("mood_keywords", "current_mood_keywords", "preferred_mood"))
+    if "카페" in food_types:
+        food_types = [term for term in food_types if term not in ("커피", "커피전문점")]
+
+    mood_phrase = _join_intro_modifiers([_intro_modifier(term) for term in moods[:2]])
+    food_phrase = food_types[0] if food_types else "장소"
+
+    if mood_phrase:
+        return f"{mood_phrase} {food_phrase} 분위기를 좋아하시는 것 같아서"
+    if food_types:
+        return f"{_object_phrase(food_phrase)} 찾고 계신 것 같아서"
+    return "취향에 맞는 장소를 찾고 계신 것 같아서"
+
+
+def _object_phrase(text):
+    last = text[-1] if text else ""
+    if "가" <= last <= "힣" and (ord(last) - ord("가")) % 28:
+        return f"{text}을"
+    return f"{text}를"
+
+
+def _list_taste_terms(taste_context, keys):
+    terms = []
+    for key in keys:
+        value = taste_context.get(key)
+        if isinstance(value, list):
+            terms.extend(str(item) for item in value if item)
+        elif value:
+            terms.append(str(value))
+    return list(dict.fromkeys(terms))
+
+
+def _intro_modifier(term):
+    if term in ("로컬", "로컬 느낌"):
+        return "로컬 느낌이 있는"
+    if term == "혼자":
+        return "혼자 머물기 좋은"
+    return term
+
+
+def _join_intro_modifiers(items):
+    items = [item for item in items if item]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    return " ".join([*[_intro_connective(item) for item in items[:-1]], items[-1]])
+
+
+def _intro_connective(text):
+    if text.endswith("한"):
+        return f"{text[:-1]}하고"
+    if text.endswith("적인"):
+        return f"{text[:-2]}이고"
+    if text.endswith("있는"):
+        return f"{text[:-2]}있고"
+    if text.endswith("좋은"):
+        return f"{text[:-2]}좋고"
+    return f"{text}이고"
+
+
+def _build_no_result_response(target_agents, agent_results):
+    if "event" in target_agents:
+        event_result = agent_results.get("event") or {}
+        return event_result.get("message") or "조건에 맞는 이벤트 추천을 찾지 못했어요."
+    if "tourist" in target_agents:
+        tour_result = agent_results.get("tourist") or {}
+        return tour_result.get("message") or "조건에 맞는 관광지 추천을 찾지 못했어요."
+    if "foodie" in target_agents:
+        foodie_result = agent_results.get("foodie") or {}
+        return foodie_result.get("message") or "조건에 맞는 Foodie 추천을 찾지 못했어요."
+    return "지금 prototype에서는 Foodie/Tour Agent 추천만 실행되고 있어요. 맛집이나 관광지 요청으로 다시 물어봐 주세요."
 
 
 if __name__ == "__main__":

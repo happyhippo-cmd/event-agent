@@ -5,6 +5,7 @@ import {
   ALBUMS,
   createFoodSuggestionsForPlace,
   getPlaceKey,
+  getPlaceSelectionKey,
   getRecommendedPlaces,
 } from '@/data/albums';
 import { useKdive } from '@/store/KdiveContext';
@@ -17,7 +18,21 @@ const TABS = [
   { id: 'events', label: '전시/팝업' },
 ];
 
-function buildHistoryItems(likedTrackIds, likedPlaceKeys, likedFoodKeys) {
+function buildPlaceHistoryItem(key, place, album) {
+  return {
+    key: `place-${key}`,
+    rawKey: key,
+    type: 'place',
+    label: place.category === 'must' ? '필수 명소' : '관광지',
+    album,
+    place,
+    title: place.name,
+    subtitle: place.source_keyword || album?.title || 'Tour Agent recommendation',
+    emoji: place.emoji || '🏛️',
+  };
+}
+
+function buildHistoryItems(likedTrackIds, likedPlaceKeys, likedPlaceRecords, likedFoodKeys, onboardingPlaces, activeAlbum) {
   const tracks = ALBUMS
     .filter((album) => likedTrackIds.has(album.id))
     .map((album) => ({
@@ -32,23 +47,18 @@ function buildHistoryItems(likedTrackIds, likedPlaceKeys, likedFoodKeys) {
 
   const places = [];
   const foods = [];
+  const seenPlaceKeys = new Set();
+
+  const pushPlace = (key, place, album) => {
+    if (!likedPlaceKeys.has(key) || seenPlaceKeys.has(key)) return;
+    places.push(buildPlaceHistoryItem(key, likedPlaceRecords[key] || place, album));
+    seenPlaceKeys.add(key);
+  };
 
   ALBUMS.forEach((album) => {
     getRecommendedPlaces(album).forEach((place) => {
       const key = getPlaceKey(album.id, place.name);
-      if (likedPlaceKeys.has(key)) {
-        places.push({
-          key: `place-${key}`,
-          rawKey: key,
-          type: 'place',
-          label: place.category === 'must' ? '필수 명소' : '관광지',
-          album,
-          place,
-          title: place.name,
-          subtitle: album.title,
-          emoji: place.emoji,
-        });
-      }
+      pushPlace(key, place, album);
 
       createFoodSuggestionsForPlace(album, place).forEach((food) => {
         if (likedFoodKeys.has(food.key)) {
@@ -66,6 +76,21 @@ function buildHistoryItems(likedTrackIds, likedPlaceKeys, likedFoodKeys) {
         }
       });
     });
+  });
+
+  onboardingPlaces.forEach((place) => {
+    const key = getPlaceSelectionKey(activeAlbum?.id || 'onboarding', place);
+    pushPlace(key, place, activeAlbum);
+  });
+
+  Object.entries(likedPlaceRecords).forEach(([key, place]) => {
+    pushPlace(key, place, activeAlbum);
+  });
+
+  likedPlaceKeys.forEach((key) => {
+    if (seenPlaceKeys.has(key)) return;
+    const [, name] = key.split('::');
+    pushPlace(key, { name: name || key, category: 'keyword', label: '관광지' }, activeAlbum);
   });
 
   return { tracks, places, foods };
@@ -127,9 +152,12 @@ export default function HistoryPage() {
   const {
     loggedIn,
     activeAppPage,
+    activeAlbum,
     likedTrackIds,
     likedPlaceKeys,
+    likedPlaceRecords,
     likedFoodKeys,
+    onboardingPlaces,
     toggleTrackLike,
     togglePlaceLike,
     toggleFoodLike,
@@ -137,8 +165,8 @@ export default function HistoryPage() {
   const [activeTab, setActiveTab] = useState('liked');
 
   const items = useMemo(
-    () => buildHistoryItems(likedTrackIds, likedPlaceKeys, likedFoodKeys),
-    [likedTrackIds, likedPlaceKeys, likedFoodKeys]
+    () => buildHistoryItems(likedTrackIds, likedPlaceKeys, likedPlaceRecords, likedFoodKeys, onboardingPlaces, activeAlbum),
+    [likedTrackIds, likedPlaceKeys, likedPlaceRecords, likedFoodKeys, onboardingPlaces, activeAlbum]
   );
 
   if (!loggedIn || activeAppPage !== 'history') return null;
@@ -155,7 +183,7 @@ export default function HistoryPage() {
 
   const handleUnlike = (item) => {
     if (item.type === 'track') toggleTrackLike(item.album.id);
-    if (item.type === 'place') togglePlaceLike(item.album.id, item.place.name);
+    if (item.type === 'place') togglePlaceLike(item.album?.id || 'history', item.place.name, item.rawKey, item.place);
     if (item.type === 'food') toggleFoodLike(item.food.key);
   };
 

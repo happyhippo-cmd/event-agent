@@ -25,6 +25,7 @@ EMBED_PROVIDER = os.getenv("FOODIE_EMBED_PROVIDER", "local_hash").lower()
 LOCAL_EMBED_DIM = int(os.getenv("FOODIE_LOCAL_EMBED_DIM", "384"))
 BATCH_SIZE = int(os.getenv("FOODIE_EMBED_BATCH_SIZE", "100"))
 TOKEN_PATTERN = re.compile(r"[0-9A-Za-z가-힣_]+")
+DISTRICT_PATTERN = re.compile(r"(서울|경기|인천)\s+([가-힣A-Za-z0-9]+(?:구|군|시))")
 
 
 def _openai_client():
@@ -181,12 +182,13 @@ def _local_hash_embedding(text: str) -> list[float]:
 
 
 def _metadata(row: dict[str, Any]) -> dict[str, Any]:
+    address = row.get("road_address") or row.get("address") or ""
     return {
         "kakao_place_id": str(row["kakao_place_id"]),
         "name": row.get("name") or "",
         "category": (row.get("category_name") or "").split(" > ")[-1],
-        "gu": row.get("gu") or "",
-        "address": row.get("road_address") or row.get("address") or "",
+        "gu": _district_from_address(address) or row.get("gu") or "",
+        "address": address,
         "lat": row.get("lat") or 0.0,
         "lng": row.get("lng") or 0.0,
         "rating": row.get("rating") or 0.0,
@@ -198,6 +200,13 @@ def _metadata(row: dict[str, Any]) -> dict[str, Any]:
         "is_bib_gourmand": row.get("is_bib_gourmand") or 0,
         "mood_tags": row.get("mood_tags") or "{}",
     }
+
+
+def _district_from_address(address: str) -> str:
+    match = DISTRICT_PATTERN.search(address or "")
+    if match:
+        return match.group(2)
+    return ""
 
 
 def main() -> None:

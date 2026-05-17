@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ALBUMS, VISIBLE_EDGE, VISIBLE_OFFSETS, normalizeAlbumIndex } from '@/data/albums';
+import { ALBUMS, MIN_TRACK_SELECTION, VISIBLE_EDGE, VISIBLE_OFFSETS, normalizeAlbumIndex } from '@/data/albums';
 import { useKdive } from '@/store/KdiveContext';
 import AlbumCard from './AlbumCard';
 
@@ -114,6 +114,7 @@ export default function AlbumCarousel() {
   });
   const currentAlbum = ALBUMS[currentIdx];
   const liked = currentAlbum ? likedTrackIds.has(currentAlbum.id) : false;
+  const selectedTrackCount = likedTrackIds.size;
 
   useEffect(() => {
     currentIdxRef.current = currentIdx;
@@ -362,6 +363,11 @@ export default function AlbumCarousel() {
           )}
         </div>
       </div>
+      <p className="text-center text-[12px] text-muted min-h-[18px]">
+        {selectedTrackCount < MIN_TRACK_SELECTION
+          ? `${MIN_TRACK_SELECTION}곡 중 ${selectedTrackCount}곡 선택됨`
+          : `${selectedTrackCount}곡 선택됨 · 관광지 추천을 준비했어요`}
+      </p>
     </>
   );
 }

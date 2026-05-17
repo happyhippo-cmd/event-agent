@@ -73,7 +73,7 @@ export default function FoodSection({ places = [] }) {
           || 140;
         const targetTop = Math.max(
           0,
-          window.scrollY + section.getBoundingClientRect().top - navHeight - playerHeight - 18
+          window.scrollY + section.getBoundingClientRect().top - navHeight - playerHeight - 8
         );
 
         window.scrollTo({ top: targetTop, behavior: 'smooth' });
@@ -110,7 +110,7 @@ export default function FoodSection({ places = [] }) {
   return (
     <section
       id="foodSection"
-      className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-stretch gap-[clamp(14px,2vw,20px)] mt-[clamp(18px,2.6vh,28px)] w-[min(1160px,calc(100%-clamp(48px,6vw,96px)))] mx-auto scroll-mt-[220px] max-[768px]:w-full max-[768px]:grid-cols-1"
+      className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-stretch gap-[clamp(14px,2vw,20px)] mt-[clamp(8px,1.4vh,14px)] w-[min(1160px,calc(100%-clamp(48px,6vw,96px)))] mx-auto scroll-mt-[220px] max-[768px]:w-full max-[768px]:grid-cols-1"
       aria-hidden="false"
     >
       <div className="min-w-0 h-[clamp(300px,calc(100vh-260px),500px)] rounded-[20px] overflow-hidden bg-white border border-[rgba(0,0,0,0.08)] flex items-center justify-center max-[768px]:h-[320px]">
@@ -122,7 +122,7 @@ export default function FoodSection({ places = [] }) {
       <div className="kd-food-list min-w-0 h-[clamp(300px,calc(100vh-260px),500px)] flex flex-col gap-3 overflow-y-auto py-1 pr-2 max-[768px]:h-auto max-[768px]:max-h-[420px]">
         {foodsLoading ? (
           <div className="rounded-[14px] border border-accent-border bg-accent-soft px-5 py-4 text-[13px] text-accent-dark">
-            Foodie Agent가 선택한 관광지 근처 맛집을 장르가 겹치지 않게 고르고 있어요.
+            Restaurant Agent가 선택한 관광지 근처 맛집을 장르가 겹치지 않게 고르고 있어요.
           </div>
         ) : null}
         {foodsError ? (
@@ -144,7 +144,7 @@ export default function FoodSection({ places = [] }) {
                 onClick={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
-                  toggleFoodLike(item.key);
+                  toggleFoodLike(item.key, item);
                 }}
                 aria-pressed={isLiked}
                 aria-label={`${item.title} ${isLiked ? '좋아요 취소' : '좋아요'}`}
@@ -165,7 +165,7 @@ export default function FoodSection({ places = [] }) {
               <div className="kd-food-card-detail">
                 <div className="min-h-[104px] overflow-hidden pb-[2px] flex flex-col justify-center">
                   <div className="text-[10px] tracking-[0.1em] uppercase text-accent mb-[6px]">
-                    {item.placeName} Foodie curation
+                    {item.placeName} Restaurant curation
                   </div>
                   <p className="text-[12px] text-black/60 leading-[1.6]">{item.curation}</p>
                 </div>

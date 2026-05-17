@@ -356,6 +356,11 @@ def _apply_user_context_to_taste(result_state, user_context):
     )
     if nickname:
         taste_context["nickname"] = nickname
+    liked_place_anchors = _extract_place_anchors(user_context.get("liked_places") or [])
+    if liked_place_anchors and not taste_context.get("nearby_place_keywords"):
+        taste_context["nearby_place_anchors"] = liked_place_anchors
+        taste_context["nearby_place_keywords"] = [anchor["name"] for anchor in liked_place_anchors]
+    if taste_context:
         state["taste_context"] = taste_context
     return state
 
@@ -466,6 +471,22 @@ def _extract_names(items):
     return list(dict.fromkeys(names))
 
 
+def _extract_place_anchors(items):
+    anchors = []
+    seen = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name") or item.get("title") or _name_from_key(item.get("key", ""))
+        lat = item.get("lat")
+        lng = item.get("lng")
+        if not name or lat is None or lng is None or name in seen:
+            continue
+        anchors.append({"name": name, "lat": lat, "lng": lng})
+        seen.add(name)
+    return anchors
+
+
 def _name_from_key(key):
     parts = [part for part in str(key).split("::") if part]
     if len(parts) >= 2:
@@ -493,6 +514,14 @@ def _run_foodie_agent(result_state, top_k):
 
 
 def _resolve_nearby_anchors(taste_context):
+    explicit_anchors = [
+        anchor
+        for anchor in taste_context.get("nearby_place_anchors", [])
+        if anchor.get("name") and anchor.get("lat") is not None and anchor.get("lng") is not None
+    ]
+    if explicit_anchors:
+        return explicit_anchors
+
     anchor_names = list(taste_context.get("nearby_place_keywords") or [])
     if not anchor_names:
         return []
@@ -569,7 +598,7 @@ def _format_foodie_recommendations(foodie_result):
 
     return [
         {
-            "source_agent": "foodie",
+            "source_agent": "restaurant",
             "id": candidate.get("kakao_place_id"),
             "name": candidate.get("name"),
             "category": candidate.get("category"),
@@ -716,18 +745,43 @@ def _build_recommendation_response(recommendations, target_agents, taste_context
 
 def _foodie_taste_intro(taste_context):
     food_types = _list_taste_terms(taste_context, ("food_type_keywords", "place_type_keywords"))
-    moods = _list_taste_terms(taste_context, ("mood_keywords", "current_mood_keywords", "preferred_mood"))
+    current_moods = _list_taste_terms(taste_context, ("mood_keywords", "current_mood_keywords"))
+    history_moods = _list_taste_terms(taste_context, ("onboarding_mood_keywords", "preferred_mood", "preferred_music"))
     if "카페" in food_types:
         food_types = [term for term in food_types if term not in ("커피", "커피전문점")]
 
-    mood_phrase = _join_intro_modifiers([_intro_modifier(term) for term in moods[:2]])
+    condition_phrase = _restaurant_condition_phrase(current_moods, food_types)
+    history_phrase = _history_preference_phrase(history_moods)
     food_phrase = food_types[0] if food_types else "장소"
 
-    if mood_phrase:
-        return f"{mood_phrase} {food_phrase} 분위기를 좋아하시는 것 같아서"
+    if history_phrase and condition_phrase:
+        return f"히스토리의 {history_phrase} 취향을 참고해서 요청하신 {condition_phrase}"
+    if history_phrase:
+        return f"히스토리의 {history_phrase} 취향을 참고해서 어울리는 {food_phrase}"
+    if condition_phrase:
+        return f"요청하신 {condition_phrase}"
     if food_types:
         return f"{_object_phrase(food_phrase)} 찾고 계신 것 같아서"
     return "취향에 맞는 장소를 찾고 계신 것 같아서"
+
+
+def _restaurant_condition_phrase(moods, food_types):
+    food_phrase = food_types[0] if food_types else "장소"
+    mood_phrase = _join_intro_modifiers([_intro_modifier(term) for term in moods[:2]])
+    if mood_phrase:
+        return f"{mood_phrase} {food_phrase}"
+    if food_types:
+        return food_phrase
+    return ""
+
+
+def _history_preference_phrase(moods):
+    meaningful = [
+        term
+        for term in moods
+        if term and term not in ("카페", "커피", "커피전문점", "맛집", "식당", "장소")
+    ]
+    return _join_intro_modifiers([_intro_modifier(term) for term in meaningful[:2]])
 
 
 def _object_phrase(text):

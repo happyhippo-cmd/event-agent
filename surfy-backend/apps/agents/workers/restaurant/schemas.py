@@ -1,13 +1,39 @@
-"""Restaurant schema aliases backed by the Foodie implementation."""
+from __future__ import annotations
 
-from apps.agents.workers.foodie.schemas import FoodieAgentResult, FoodieCandidate
+from pydantic import BaseModel, Field
 
-RestaurantAgentResult = FoodieAgentResult
-RestaurantCandidate = FoodieCandidate
 
-__all__ = [
-    "FoodieAgentResult",
-    "FoodieCandidate",
-    "RestaurantAgentResult",
-    "RestaurantCandidate",
-]
+class RestaurantCandidate(BaseModel):
+    """A place candidate returned from the enriched-place vector store."""
+
+    kakao_place_id: str
+    name: str
+    category: str
+    gu: str
+    address: str
+    lat: float | None = None
+    lng: float | None = None
+    rating: float | None = None
+    review_count: int | None = None
+    price_level: int | None = None
+    michelin_stars: int = 0
+    is_bib_gourmand: bool = False
+    mood_tags: dict = Field(default_factory=dict)
+    similarity_score: float = Field(ge=0.0, le=1.0)
+    matched_preferences: list[str] = Field(default_factory=list)
+    ranking_basis: str = ""
+    curation: str = ""
+
+
+class RestaurantAgentResult(BaseModel):
+    """Restaurant worker output stored in KDiveState."""
+
+    status: str
+    query: str
+    candidates: list[RestaurantCandidate] = Field(default_factory=list)
+    message: str = ""
+
+
+# Legacy aliases while older imports still refer to the previous Foodie names.
+FoodieCandidate = RestaurantCandidate
+FoodieAgentResult = RestaurantAgentResult

@@ -1,3 +1,3 @@
-"""Restaurant filter aliases backed by the Foodie implementation."""
+"""Restaurant filter helpers live in agent.py for the current prototype."""
 
-from apps.agents.workers.foodie.filter import *  # noqa: F403
+__all__: list[str] = []

@@ -19,12 +19,20 @@ const getFallbackEmoji = (card) => {
 const getAgentPickLabel = (sourceAgent) => {
   if (sourceAgent === 'tourist') return 'Tour pick';
   if (sourceAgent === 'event') return 'Event pick';
-  return 'Foodie pick';
+  return 'Restaurant pick';
 };
 
 export default function SurfyChat() {
   const { activeChat, sendUserMessage, handleSuggestionClick } = useSurfyChat();
-  const { activeAlbum, currentIdx, likedPlaceKeys, likedFoodKeys } = useKdive();
+  const {
+    activeAlbum,
+    currentIdx,
+    likedTrackIds,
+    likedPlaceKeys,
+    likedPlaceRecords,
+    likedFoodKeys,
+    likedFoodRecords,
+  } = useKdive();
   const conversationRef = useRef(null);
   const [draft, setDraft] = useState('');
   const [tripMode, setTripMode] = useState('Before trip');
@@ -40,7 +48,11 @@ export default function SurfyChat() {
 
   const buildUserContext = () => {
     const album = activeAlbum || ALBUMS[currentIdx];
-    const musicKeywords = album?.vibe ? album.vibe.split('·').map((k) => k.trim()).filter(Boolean) : [];
+    const likedAlbums = ALBUMS.filter((item) => likedTrackIds.has(item.id));
+    const keywordAlbums = likedAlbums.length ? likedAlbums : [album].filter(Boolean);
+    const musicKeywords = Array.from(new Set(keywordAlbums.flatMap((item) => (
+      item?.vibe ? item.vibe.split('·').map((k) => k.trim()).filter(Boolean) : []
+    ))));
     const nameFromKey = (key) => key.split('::')[1] || key;
     const foodNameFromKey = (key) => {
       const parts = key.split('::');
@@ -48,8 +60,20 @@ export default function SurfyChat() {
     };
     return {
       music_keywords: musicKeywords,
-      liked_places: Array.from(likedPlaceKeys).slice(0, 10).map((key) => ({ key, name: nameFromKey(key), category: '관광지' })),
-      liked_foods: Array.from(likedFoodKeys).slice(0, 10).map((key) => ({ key, name: foodNameFromKey(key), category: '맛집' })),
+      liked_places: Array.from(likedPlaceKeys).slice(0, 10).map((key) => ({
+        key,
+        name: likedPlaceRecords[key]?.name || nameFromKey(key),
+        category: likedPlaceRecords[key]?.category || '관광지',
+        keyword: likedPlaceRecords[key]?.source_keyword,
+        lat: likedPlaceRecords[key]?.lat,
+        lng: likedPlaceRecords[key]?.lng,
+        address: likedPlaceRecords[key]?.address,
+      })),
+      liked_foods: Array.from(likedFoodKeys).slice(0, 10).map((key) => ({
+        key,
+        name: likedFoodRecords[key]?.title || likedFoodRecords[key]?.name || foodNameFromKey(key),
+        category: likedFoodRecords[key]?.genre || likedFoodRecords[key]?.category || '맛집',
+      })),
       extras: {
         trip_mode: tripMode,
         active_track: album ? { title: album.title, artist: album.artist, vibe: album.vibe } : null,

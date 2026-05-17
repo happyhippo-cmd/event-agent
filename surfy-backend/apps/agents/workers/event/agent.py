@@ -1,15 +1,24 @@
-"""Event worker agent backed by the Django Event model when available."""
+"""Event worker agent backed by the local event DB."""
 
 from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from datetime import date
+from pathlib import Path
 from typing import Any
+
+from dotenv import load_dotenv
 
 from apps.agents.state import AGENT_EVENT, KDiveState
 
+BASE_DIR = Path(__file__).resolve().parents[4]
+load_dotenv(BASE_DIR / ".env")
+
 DEFAULT_EVENT_TOP_K = 3
+EVENT_DB_PATH = Path(os.getenv("EVENT_DB_PATH", BASE_DIR / "data" / "event_db.sqlite3"))
+EVENT_TABLE = os.getenv("EVENT_DB_TABLE", "events_event")
 
 SEOUL_AREAS = (
     "성수", "홍대", "강남", "이태원", "명동", "신촌", "합정", "망원",
@@ -21,7 +30,8 @@ SEOUL_AREAS = (
 STOP_WORDS = {
     "팝업", "팝업스토어", "전시", "전시회", "공연", "콘서트", "페스티벌",
     "추천", "해줘", "알려줘", "보여줘", "있어", "어디", "뭐", "좀",
-    "이번", "주말", "갈만한", "가볼만한",
+    "이번", "주말", "갈만한", "가볼만한", "열리는", "볼거리", "있을까",
+    "있나요", "중에",
 }
 
 POPUP_SUBCATEGORIES = {
@@ -71,32 +81,15 @@ def run_event_agent(
 ) -> dict[str, Any]:
     """Return event recommendations for Surfy's worker-agent pipeline."""
 
-    django_bits = _load_django_event_model()
-    if django_bits.get("error"):
+    mood = _event_mood_from_taste(taste_context or {})
+    try:
+        events = search_events_from_db(query=query, mood=mood, limit=20)
+    except Exception as exc:
         return {
-            "status": "not_configured",
-            "message": (
-                "Event Agent는 worker 위치에 연결됐지만, 아직 이벤트 DB 모델을 불러오지 못했어요. "
-                "Django events 앱과 Event 모델이 surfy-backend 런타임에서 보이도록 연결해야 해요."
-            ),
-            "detail": django_bits["error"],
+            "status": "error",
+            "message": f"Event DB 조회 중 오류가 발생했어요: {exc}",
             "recommended_events": [],
         }
-
-    event_model = django_bits["event_model"]
-    q_class = django_bits["q_class"]
-    timezone = django_bits["timezone"]
-    field_names = _model_field_names(event_model)
-    mood = _event_mood_from_taste(taste_context or {})
-    events = search_events(
-        event_model=event_model,
-        q_class=q_class,
-        timezone=timezone,
-        field_names=field_names,
-        query=query,
-        mood=mood,
-        limit=20,
-    )
 
     if not events:
         return {
@@ -139,6 +132,162 @@ def run_event_agent_for_state(state: KDiveState, top_k: int = DEFAULT_EVENT_TOP_
 
 def run(query: str, **kwargs: Any) -> dict[str, Any]:
     return run_event_agent(query=query, **kwargs)
+
+
+def search_events_from_db(query: str, mood: str = "", limit: int = 20) -> list[dict[str, Any]]:
+    rows = _load_event_rows()
+    today = date.today().isoformat()
+    active_rows = [
+        row for row in rows
+        if not row.get("end_date") or str(row.get("end_date")) >= today
+    ]
+
+    detected_category = _detect_category(query, mood)
+    sub_category_filter = _detect_subcategory_filter(query, mood)
+    detected_areas = [area for area in SEOUL_AREAS if area in query]
+    broad_seoul = "서울" in query and not detected_areas
+    keywords = _event_keywords(query, mood, detected_areas)
+
+    filtered = _filter_event_rows(
+        active_rows,
+        detected_category=detected_category,
+        sub_category_filter=sub_category_filter,
+        detected_areas=detected_areas,
+        broad_seoul=broad_seoul,
+    )
+    if not filtered and detected_areas:
+        filtered = _filter_event_rows(
+            active_rows,
+            detected_category=detected_category,
+            sub_category_filter=sub_category_filter,
+            detected_areas=[],
+            broad_seoul=broad_seoul,
+        )
+    if not filtered:
+        filtered = active_rows
+
+    scored = [
+        (_event_score(row, query, mood, detected_category, sub_category_filter, detected_areas, broad_seoul, keywords), row)
+        for row in filtered
+    ]
+    scored.sort(key=lambda item: (-item[0], str(item[1].get("start_date") or "")))
+    return [row for _, row in scored[:limit]]
+
+
+def _load_event_rows() -> list[dict[str, Any]]:
+    if not EVENT_DB_PATH.exists():
+        raise FileNotFoundError(f"event DB not found: {EVENT_DB_PATH}")
+
+    conn = sqlite3.connect(EVENT_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(f"SELECT * FROM {EVENT_TABLE}").fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def _filter_event_rows(
+    rows: list[dict[str, Any]],
+    detected_category: str | None,
+    sub_category_filter: list[str],
+    detected_areas: list[str],
+    broad_seoul: bool,
+) -> list[dict[str, Any]]:
+    filtered = []
+    for row in rows:
+        if detected_category and not _row_matches_category(row, detected_category):
+            continue
+        if sub_category_filter and not _row_matches_subcategory(row, sub_category_filter):
+            continue
+        if detected_areas and not _row_matches_area(row, detected_areas):
+            continue
+        if broad_seoul and "서울" not in _row_text(row, ("location", "region")):
+            continue
+        filtered.append(row)
+    return filtered
+
+
+def _row_matches_category(row: dict[str, Any], category: str) -> bool:
+    return category in _row_text(row, ("new_main_category", "main_category", "category"))
+
+
+def _row_matches_subcategory(row: dict[str, Any], subcategories: list[str]) -> bool:
+    haystack = _row_text(row, ("new_sub_category", "sub_category", "detail_category", "description", "hashtags"))
+    return any(subcategory and subcategory in haystack for subcategory in subcategories)
+
+
+def _row_matches_area(row: dict[str, Any], areas: list[str]) -> bool:
+    haystack = _row_text(row, ("region", "location"))
+    return any(area and area in haystack for area in areas)
+
+
+def _event_keywords(query: str, mood: str, detected_areas: list[str]) -> list[str]:
+    category_keywords = set(CATEGORY_KEYWORDS.keys())
+    keywords = []
+    for keyword in _extract_keywords(f"{query} {mood}"):
+        if keyword in category_keywords or keyword == "서울":
+            continue
+        if any(area in keyword for area in (*SEOUL_AREAS, *detected_areas)):
+            continue
+        keywords.append(keyword)
+    return list(dict.fromkeys(keywords))
+
+
+def _event_score(
+    row: dict[str, Any],
+    query: str,
+    mood: str,
+    detected_category: str | None,
+    sub_category_filter: list[str],
+    detected_areas: list[str],
+    broad_seoul: bool,
+    keywords: list[str],
+) -> float:
+    score = 0.0
+    if detected_category and _row_matches_category(row, detected_category):
+        score += 8.0
+    if sub_category_filter and _row_matches_subcategory(row, sub_category_filter):
+        score += 5.0
+    if detected_areas and _row_matches_area(row, detected_areas):
+        score += 8.0
+    if broad_seoul and "서울" in _row_text(row, ("location",)):
+        score += 2.0
+
+    title_text = _row_text(row, ("title",))
+    tag_text = _row_text(
+        row,
+        (
+            "hashtags", "mood_tags", "emotion_tags", "activity_tags",
+            "theme_tags", "space_tags", "audience_tags", "music_genre",
+            "new_mood_tags", "new_audience_tags", "vector_summary", "vector_summary_v2",
+        ),
+    )
+    full_text = _row_text(row, ("title", "description", "location", "region")) + " " + tag_text
+    for keyword in keywords:
+        if keyword in title_text:
+            score += 4.0
+        elif keyword in tag_text:
+            score += 2.5
+        elif keyword in full_text:
+            score += 1.0
+
+    if row.get("thumbnail_url"):
+        score += 0.4
+    if row.get("start_date"):
+        score += 0.1
+    return score
+
+
+def _row_text(row: dict[str, Any], keys: tuple[str, ...]) -> str:
+    parts = []
+    for key in keys:
+        value = row.get(key)
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            parts.extend(str(item) for item in value if item)
+        else:
+            parts.append(str(value))
+    return " ".join(parts)
 
 
 def search_events(
@@ -431,6 +580,8 @@ def _fallback_reason(event: Any, query: str) -> str:
 
 
 def _event_attr(event: Any, key: str) -> Any:
+    if isinstance(event, dict):
+        return event.get(key)
     return getattr(event, key, None)
 
 

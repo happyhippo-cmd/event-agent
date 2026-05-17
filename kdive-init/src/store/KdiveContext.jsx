@@ -21,6 +21,7 @@ export function KdiveProvider({ children }) {
   const [likedPlaceKeys, setLikedPlaceKeys] = useState(() => new Set());
   const [likedPlaceRecords, setLikedPlaceRecords] = useState(() => ({}));
   const [likedFoodKeys, setLikedFoodKeys] = useState(() => new Set());
+  const [likedFoodRecords, setLikedFoodRecords] = useState(() => ({}));
   const [onboardingPlaces, setOnboardingPlaces] = useState([]);
   const [placesLoading, setPlacesLoading] = useState(false);
   const [placesError, setPlacesError] = useState('');
@@ -82,6 +83,13 @@ export function KdiveProvider({ children }) {
         ? stored.map((item) => (typeof item === 'string' ? item : item?.key)).filter(Boolean)
         : [];
       setLikedFoodKeys(new Set(keys));
+      const records = {};
+      if (Array.isArray(stored)) {
+        stored.forEach((item) => {
+          if (item?.key && item?.food) records[item.key] = item.food;
+        });
+      }
+      setLikedFoodRecords(records);
     } catch (e) {}
   }, []);
 
@@ -113,9 +121,12 @@ export function KdiveProvider({ children }) {
     if (typeof window === 'undefined') return;
     if (!SHOULD_PERSIST_SELECTIONS) return;
     try {
-      localStorage.setItem(LIKED_FOODS_STORAGE_KEY, JSON.stringify(Array.from(likedFoodKeys).map((key) => ({ key }))));
+      localStorage.setItem(LIKED_FOODS_STORAGE_KEY, JSON.stringify(Array.from(likedFoodKeys).map((key) => ({
+        key,
+        food: likedFoodRecords[key],
+      }))));
     } catch (e) {}
-  }, [likedFoodKeys]);
+  }, [likedFoodKeys, likedFoodRecords]);
 
   useEffect(() => {
     if (likedTrackIds.size < MIN_TRACK_SELECTION) {
@@ -247,14 +258,21 @@ export function KdiveProvider({ children }) {
     });
   }, [likedPlaceKeys]);
 
-  const toggleFoodLike = useCallback((foodKey) => {
+  const toggleFoodLike = useCallback((foodKey, foodRecord) => {
+    const shouldUnlike = likedFoodKeys.has(foodKey);
     setLikedFoodKeys((prev) => {
       const next = new Set(prev);
       if (next.has(foodKey)) next.delete(foodKey);
       else next.add(foodKey);
       return next;
     });
-  }, []);
+    setLikedFoodRecords((records) => {
+      const nextRecords = { ...records };
+      if (shouldUnlike) delete nextRecords[foodKey];
+      else if (foodRecord) nextRecords[foodKey] = foodRecord;
+      return nextRecords;
+    });
+  }, [likedFoodKeys]);
 
   const showAuth = useCallback(() => {
     setAuthVisible(true);
@@ -323,7 +341,7 @@ export function KdiveProvider({ children }) {
 
   const value = useMemo(() => ({
     currentIdx, activeAlbum, activeAlbumId,
-    likedTrackIds, likedPlaceKeys, likedPlaceRecords, likedFoodKeys,
+    likedTrackIds, likedPlaceKeys, likedPlaceRecords, likedFoodKeys, likedFoodRecords,
     onboardingPlaces, placesLoading, placesError,
     curationVisible, foodVisible, authVisible, loggedIn, activeAppPage,
     selectedPlaceIndex, setSelectedPlaceIndex,
@@ -336,7 +354,7 @@ export function KdiveProvider({ children }) {
     retryOnboardingPlaces, showCurationForAlbum, goBackToOnboarding, loginToSurfy, showAppPage,
   }), [
     currentIdx, activeAlbum, activeAlbumId,
-    likedTrackIds, likedPlaceKeys, likedPlaceRecords, likedFoodKeys,
+    likedTrackIds, likedPlaceKeys, likedPlaceRecords, likedFoodKeys, likedFoodRecords,
     onboardingPlaces, placesLoading, placesError,
     curationVisible, foodVisible, authVisible, loggedIn, activeAppPage,
     selectedPlaceIndex,

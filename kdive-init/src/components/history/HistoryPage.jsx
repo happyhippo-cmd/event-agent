@@ -32,7 +32,29 @@ function buildPlaceHistoryItem(key, place, album) {
   };
 }
 
-function buildHistoryItems(likedTrackIds, likedPlaceKeys, likedPlaceRecords, likedFoodKeys, onboardingPlaces, activeAlbum) {
+function buildFoodHistoryItem(key, food, album) {
+  return {
+    key: `food-${key}`,
+    rawKey: key,
+    type: 'food',
+    label: '맛집',
+    album,
+    food,
+    title: food.title || food.name || key,
+    subtitle: food.placeName || food.area || food.genre || food.category || 'Restaurant Agent recommendation',
+    emoji: '🍜',
+  };
+}
+
+function buildHistoryItems(
+  likedTrackIds,
+  likedPlaceKeys,
+  likedPlaceRecords,
+  likedFoodKeys,
+  likedFoodRecords,
+  onboardingPlaces,
+  activeAlbum
+) {
   const tracks = ALBUMS
     .filter((album) => likedTrackIds.has(album.id))
     .map((album) => ({
@@ -48,6 +70,7 @@ function buildHistoryItems(likedTrackIds, likedPlaceKeys, likedPlaceRecords, lik
   const places = [];
   const foods = [];
   const seenPlaceKeys = new Set();
+  const seenFoodKeys = new Set();
 
   const pushPlace = (key, place, album) => {
     if (!likedPlaceKeys.has(key) || seenPlaceKeys.has(key)) return;
@@ -61,18 +84,9 @@ function buildHistoryItems(likedTrackIds, likedPlaceKeys, likedPlaceRecords, lik
       pushPlace(key, place, album);
 
       createFoodSuggestionsForPlace(album, place).forEach((food) => {
-        if (likedFoodKeys.has(food.key)) {
-          foods.push({
-            key: `food-${food.key}`,
-            rawKey: food.key,
-            type: 'food',
-            label: '맛집',
-            album,
-            food,
-            title: food.title,
-            subtitle: food.placeName,
-            emoji: '🍜',
-          });
+        if (likedFoodKeys.has(food.key) && !seenFoodKeys.has(food.key)) {
+          foods.push(buildFoodHistoryItem(food.key, likedFoodRecords[food.key] || food, album));
+          seenFoodKeys.add(food.key);
         }
       });
     });
@@ -91,6 +105,19 @@ function buildHistoryItems(likedTrackIds, likedPlaceKeys, likedPlaceRecords, lik
     if (seenPlaceKeys.has(key)) return;
     const [, name] = key.split('::');
     pushPlace(key, { name: name || key, category: 'keyword', label: '관광지' }, activeAlbum);
+  });
+
+  Object.entries(likedFoodRecords).forEach(([key, food]) => {
+    if (!likedFoodKeys.has(key) || seenFoodKeys.has(key)) return;
+    foods.push(buildFoodHistoryItem(key, food, activeAlbum));
+    seenFoodKeys.add(key);
+  });
+
+  likedFoodKeys.forEach((key) => {
+    if (seenFoodKeys.has(key)) return;
+    const [, name] = key.split('::');
+    foods.push(buildFoodHistoryItem(key, { key, title: name || key, category: '맛집' }, activeAlbum));
+    seenFoodKeys.add(key);
   });
 
   return { tracks, places, foods };
@@ -157,6 +184,7 @@ export default function HistoryPage() {
     likedPlaceKeys,
     likedPlaceRecords,
     likedFoodKeys,
+    likedFoodRecords,
     onboardingPlaces,
     toggleTrackLike,
     togglePlaceLike,
@@ -165,8 +193,16 @@ export default function HistoryPage() {
   const [activeTab, setActiveTab] = useState('liked');
 
   const items = useMemo(
-    () => buildHistoryItems(likedTrackIds, likedPlaceKeys, likedPlaceRecords, likedFoodKeys, onboardingPlaces, activeAlbum),
-    [likedTrackIds, likedPlaceKeys, likedPlaceRecords, likedFoodKeys, onboardingPlaces, activeAlbum]
+    () => buildHistoryItems(
+      likedTrackIds,
+      likedPlaceKeys,
+      likedPlaceRecords,
+      likedFoodKeys,
+      likedFoodRecords,
+      onboardingPlaces,
+      activeAlbum
+    ),
+    [likedTrackIds, likedPlaceKeys, likedPlaceRecords, likedFoodKeys, likedFoodRecords, onboardingPlaces, activeAlbum]
   );
 
   if (!loggedIn || activeAppPage !== 'history') return null;
@@ -184,7 +220,7 @@ export default function HistoryPage() {
   const handleUnlike = (item) => {
     if (item.type === 'track') toggleTrackLike(item.album.id);
     if (item.type === 'place') togglePlaceLike(item.album?.id || 'history', item.place.name, item.rawKey, item.place);
-    if (item.type === 'food') toggleFoodLike(item.food.key);
+    if (item.type === 'food') toggleFoodLike(item.rawKey);
   };
 
   return (

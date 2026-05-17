@@ -6,6 +6,8 @@ import json
 import os
 from typing import Any
 
+from apps.agents.utils import get_openai_client
+
 
 def curate_restaurant_items(
     items: list[Any],
@@ -19,7 +21,7 @@ def curate_restaurant_items(
     callers can keep their deterministic fallback curation.
     """
 
-    client = _load_openai_client()
+    client = get_openai_client()
     if client is None or not items:
         return {}
 
@@ -93,18 +95,6 @@ def curate_restaurant_items(
         if item_id in item_by_id and curation:
             curations[item_id] = curation
     return curations
-
-
-def _load_openai_client() -> Any | None:
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        return None
-    try:
-        from openai import OpenAI
-
-        return OpenAI(api_key=api_key)
-    except Exception:
-        return None
 
 
 def _item_payload(item: Any) -> dict[str, Any]:

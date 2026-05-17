@@ -12,6 +12,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 from apps.agents.state import AGENT_EVENT, KDiveState
+from apps.agents.utils import get_openai_client
 
 BASE_DIR = Path(__file__).resolve().parents[4]
 load_dotenv(BASE_DIR / ".env")
@@ -355,7 +356,7 @@ def curate_events_with_llm(
     history: list[dict[str, str]],
     top_k: int,
 ) -> list[dict[str, Any]]:
-    client = _load_openai_client()
+    client = get_openai_client()
     if client is None:
         return []
 
@@ -446,25 +447,6 @@ def _load_django_event_model() -> dict[str, Any]:
     except Exception as exc:
         return {"error": str(exc)}
     return {"event_model": Event, "q_class": Q, "timezone": timezone}
-
-
-def _load_openai_client() -> Any | None:
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        try:
-            from django.conf import settings
-
-            api_key = getattr(settings, "OPENAI_API_KEY", None)
-        except Exception:
-            api_key = None
-    if not api_key:
-        return None
-    try:
-        from openai import OpenAI
-
-        return OpenAI(api_key=api_key)
-    except Exception:
-        return None
 
 
 def _model_field_names(event_model: Any) -> set[str]:

@@ -7,11 +7,12 @@ Tour Worker Agent — entry node
 
 import os
 import sqlite3
-import math
 import json
 import requests
 from pathlib import Path
 from dotenv import load_dotenv
+
+from apps.agents.utils import haversine_km, topic_label
 
 BASE_DIR = Path(__file__).resolve().parents[4]
 load_dotenv(BASE_DIR / ".env")
@@ -173,15 +174,9 @@ def rank_places_llm(places: list[dict], user_message: str,
     return ranked, reason
 
 
-# ── Haversine 거리 계산 (km) ──────────────────────────────────────────────────
+# ── Haversine 거리 계산 (km) — apps.agents.utils 공유 함수 사용 ───────────────
 def _haversine(lat1, lon1, lat2, lon2):
-    R = 6371
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = (math.sin(dlat / 2) ** 2
-         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
-         * math.sin(dlon / 2) ** 2)
-    return R * 2 * math.asin(math.sqrt(a))
+    return haversine_km(lat1, lon1, lat2, lon2)
 
 
 # ── DB: 위치명으로 좌표 조회 ──────────────────────────────────────────────────
@@ -589,10 +584,7 @@ def _onboarding_place_from_row(
 
 
 def _topic_label(name: str) -> str:
-    last = name[-1] if name else ""
-    if "가" <= last <= "힣" and (ord(last) - ord("가")) % 28:
-        return f"{name}은"
-    return f"{name}는"
+    return topic_label(name)
 
 
 def _float_or_none(value):

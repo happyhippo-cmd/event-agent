@@ -24,7 +24,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 from apps.agents.state import AGENT_FOODIE, KDiveState, OnboardingData, PreviousTurn
 from apps.agents.supervisor import supervisor_intake, continue_after_clarification
-from apps.agents.workers.foodie import run_foodie_agent_for_state
+from apps.agents.workers.restaurant import run_restaurant_agent_for_state as run_foodie_agent_for_state
 
 # ============================================================
 # 더미 데이터 — 테스트용 가상 사용자 프로필

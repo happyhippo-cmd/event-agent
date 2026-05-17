@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import json
-import math
 import os
-import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -11,17 +9,25 @@ from typing import Any
 from dotenv import load_dotenv
 
 from apps.agents.state import AGENT_FOODIE, AGENT_RESTAURANT, KDiveState
+from apps.agents.utils import (
+    DISTRICT_PATTERN,
+    haversine_km as _haversine_km,
+    join_modifiers as _join_modifiers,
+    join_unique as _join_unique,
+    object_phrase as _object_phrase,
+    preference_modifier as _preference_modifier,
+    taste_terms as _taste_terms,
+    to_connective as _to_connective,
+    topic_label,
+)
 
 from .schemas import RestaurantAgentResult, RestaurantCandidate
+from .vector_store import ENRICHED_DB_PATH
 
 BASE_DIR = Path(__file__).resolve().parents[4]
 load_dotenv(BASE_DIR / ".env")
 
 DEFAULT_TOP_K = 3
-ENRICHED_DB_PATH = Path(
-    os.getenv("RESTAURANT_ENRICHED_DB_PATH")
-    or os.getenv("ENRICHED_DB_PATH", BASE_DIR / "data" / "foodie_enriched.db")
-)
 CHAIN_BRANDS = (
     "스타벅스", "커피빈", "투썸", "이디야", "메가커피", "컴포즈", "빽다방",
     "할리스", "폴바셋", "파스쿠찌", "엔제리너스", "탐앤탐스", "공차",
@@ -29,7 +35,6 @@ CHAIN_BRANDS = (
     "맘스터치",
 )
 LOCAL_INTENT_TERMS = ("로컬", "동네", "개인", "독립", "숨은", "체인", "프랜차이즈", "말고")
-DISTRICT_PATTERN = re.compile(r"(서울|경기|인천)\s+([가-힣A-Za-z0-9]+(?:구|군|시))")
 
 FOOD_CATEGORY_GROUPS = {
     "카페": ("카페", "커피", "커피전문점", "디저트", "브런치", "베이커리", "북카페", "찻집"),
@@ -444,19 +449,6 @@ def _nearest_anchor(row: dict[str, Any], anchors: list[dict[str, Any]]) -> dict[
     return nearest
 
 
-def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
-    radius = 6371.0
-    dlat = math.radians(lat2 - lat1)
-    dlng = math.radians(lng2 - lng1)
-    a = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(math.radians(lat1))
-        * math.cos(math.radians(lat2))
-        * math.sin(dlng / 2) ** 2
-    )
-    return radius * 2 * math.asin(math.sqrt(a))
-
-
 def _food_genre(category: str) -> str:
     for genre, keywords in FOOD_GENRE_KEYWORDS.items():
         if any(keyword in category for keyword in keywords):
@@ -604,11 +596,6 @@ def _genre_experience_phrase(category: str, place_label: str) -> str:
     return "맛집 코스를"
 
 
-def _object_phrase(text: str) -> str:
-    last = text[-1] if text else ""
-    if "가" <= last <= "힣" and (ord(last) - ord("가")) % 28:
-        return f"{text}을"
-    return f"{text}를"
 
 
 def _place_type_label(row: dict[str, Any]) -> str:
@@ -629,10 +616,7 @@ def _place_type_label(row: dict[str, Any]) -> str:
 
 
 def _topic_label(label: str) -> str:
-    last = label[-1] if label else ""
-    if "가" <= last <= "힣" and (ord(last) - ord("가")) % 28:
-        return f"이 {label}은"
-    return f"이 {label}는"
+    return f"이 {topic_label(label)}"
 
 
 def _atmosphere_phrase(mood_tags: dict[str, Any]) -> str:
@@ -670,47 +654,6 @@ def _describe_mood_tag(tag: str) -> str:
     return mapping.get(tag, tag)
 
 
-def _taste_terms(taste_context: dict[str, Any], keys: tuple[str, ...]) -> list[str]:
-    terms: list[str] = []
-    for key in keys:
-        value = taste_context.get(key)
-        if isinstance(value, list):
-            terms.extend(str(item) for item in value if item)
-        elif value:
-            terms.append(str(value))
-    return list(dict.fromkeys(terms))
-
-
-def _preference_modifier(term: str) -> str:
-    mapping = {
-        "로컬 느낌": "로컬 느낌이 있는",
-        "로컬": "로컬 느낌이 있는",
-        "혼자": "혼자 머물기 좋은",
-    }
-    return mapping.get(term, term)
-
-
-def _join_modifiers(items: list[str]) -> str:
-    items = [item for item in items if item]
-    if not items:
-        return ""
-    if len(items) == 1:
-        return items[0]
-
-    converted = [_to_connective(item) for item in items[:-1]]
-    return " ".join([*converted, items[-1]])
-
-
-def _to_connective(text: str) -> str:
-    if text.endswith("한"):
-        return f"{text[:-1]}하고"
-    if text.endswith("적인"):
-        return f"{text[:-2]}이고"
-    if text.endswith("있는"):
-        return f"{text[:-2]}있고"
-    if text.endswith("좋은"):
-        return f"{text[:-2]}좋고"
-    return f"{text}이고"
 
 
 def _user_label(taste_context: dict[str, Any]) -> str:
@@ -779,8 +722,6 @@ def _menu_phrase(row: dict[str, Any], mood_tags: dict[str, Any]) -> str:
     return ""
 
 
-def _join_unique(items: list[str]) -> str:
-    return ", ".join(dict.fromkeys(item for item in items if item))
 
 
 def _preference_terms(taste_context: dict[str, Any]) -> list[str]:

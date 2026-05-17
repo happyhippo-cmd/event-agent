@@ -16,6 +16,16 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from dotenv import load_dotenv
 
+# 공유 유틸 — 에이전트 모듈과 동일 함수를 사용한다
+from apps.agents.utils import (
+    join_modifiers as _join_intro_modifiers,
+    object_phrase as _object_phrase,
+    preference_modifier as _intro_modifier,
+    taste_terms as _list_taste_terms,
+    to_connective as _intro_connective,
+    topic_label,
+)
+
 
 HOST = "0.0.0.0"
 PORT = 8000
@@ -709,10 +719,7 @@ def _build_tour_curation(name, category, distance, reason, overview):
 
 
 def _subject_phrase(text):
-    last = text[-1] if text else ""
-    if "가" <= last <= "힣" and (ord(last) - ord("가")) % 28:
-        return f"{text}은"
-    return f"{text}는"
+    return topic_label(text)
 
 
 def _tour_category_label(category):
@@ -784,51 +791,9 @@ def _history_preference_phrase(moods):
     return _join_intro_modifiers([_intro_modifier(term) for term in meaningful[:2]])
 
 
-def _object_phrase(text):
-    last = text[-1] if text else ""
-    if "가" <= last <= "힣" and (ord(last) - ord("가")) % 28:
-        return f"{text}을"
-    return f"{text}를"
 
-
-def _list_taste_terms(taste_context, keys):
-    terms = []
-    for key in keys:
-        value = taste_context.get(key)
-        if isinstance(value, list):
-            terms.extend(str(item) for item in value if item)
-        elif value:
-            terms.append(str(value))
-    return list(dict.fromkeys(terms))
-
-
-def _intro_modifier(term):
-    if term in ("로컬", "로컬 느낌"):
-        return "로컬 느낌이 있는"
-    if term == "혼자":
-        return "혼자 머물기 좋은"
-    return term
-
-
-def _join_intro_modifiers(items):
-    items = [item for item in items if item]
-    if not items:
-        return ""
-    if len(items) == 1:
-        return items[0]
-    return " ".join([*[_intro_connective(item) for item in items[:-1]], items[-1]])
-
-
-def _intro_connective(text):
-    if text.endswith("한"):
-        return f"{text[:-1]}하고"
-    if text.endswith("적인"):
-        return f"{text[:-2]}이고"
-    if text.endswith("있는"):
-        return f"{text[:-2]}있고"
-    if text.endswith("좋은"):
-        return f"{text[:-2]}좋고"
-    return f"{text}이고"
+# _object_phrase, _list_taste_terms, _intro_modifier, _join_intro_modifiers, _intro_connective
+# → apps.agents.utils 에서 import 완료 (파일 상단)
 
 
 def _build_no_result_response(target_agents, agent_results):

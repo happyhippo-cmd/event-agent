@@ -1,25 +1,35 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import os
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
 
 import chromadb
-from openai import OpenAI
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parents[4]
+load_dotenv(BASE_DIR / ".env")
+
 DATA_DIR = BASE_DIR / "data"
 ENRICHED_DB_PATH = Path(os.getenv("ENRICHED_DB_PATH", DATA_DIR / "foodie_enriched.db"))
 CHROMA_PATH = Path(os.getenv("FOODIE_CHROMA_PATH", DATA_DIR / "chroma_db"))
 COLLECTION_NAME = os.getenv("FOODIE_CHROMA_COLLECTION", "foodie_places")
 EMBED_MODEL = os.getenv("FOODIE_EMBED_MODEL", "text-embedding-3-small")
+EMBED_PROVIDER = os.getenv("FOODIE_EMBED_PROVIDER", "local_hash").lower()
+LOCAL_EMBED_DIM = int(os.getenv("FOODIE_LOCAL_EMBED_DIM", "384"))
 BATCH_SIZE = int(os.getenv("FOODIE_EMBED_BATCH_SIZE", "100"))
+TOKEN_PATTERN = re.compile(r"[0-9A-Za-z가-힣_]+")
 
 
-def _openai_client() -> OpenAI:
+def _openai_client():
+    from openai import OpenAI
+
     return OpenAI()
 
 
@@ -98,14 +108,10 @@ def build_vector_db(reset: bool = False, limit: int | None = None) -> int:
     if not targets:
         return collection.count()
 
-    client = _openai_client()
     for i in range(0, len(targets), BATCH_SIZE):
         batch = targets[i : i + BATCH_SIZE]
         documents = [make_place_text(row) for row in batch]
-        embeddings = [
-            item.embedding
-            for item in client.embeddings.create(model=EMBED_MODEL, input=documents).data
-        ]
+        embeddings = embed_texts(documents)
         ids = [str(row["kakao_place_id"]) for row in batch]
         metadatas = [_metadata(row) for row in batch]
         collection.add(
@@ -123,8 +129,7 @@ def query_places(query: str, top_k: int = 5) -> list[dict[str, Any]]:
     if collection.count() == 0:
         raise RuntimeError("foodie vector DB is empty. Run build_vector_db first.")
 
-    client = _openai_client()
-    q_vec = client.embeddings.create(model=EMBED_MODEL, input=[query]).data[0].embedding
+    q_vec = embed_texts([query])[0]
     result = collection.query(
         query_embeddings=[q_vec],
         n_results=top_k,
@@ -143,6 +148,36 @@ def query_places(query: str, top_k: int = 5) -> list[dict[str, Any]]:
         row["similarity_score"] = max(0.0, min(1.0, 1.0 - float(distance)))
         rows.append(row)
     return rows
+
+
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    if EMBED_PROVIDER == "openai":
+        client = _openai_client()
+        return [
+            item.embedding
+            for item in client.embeddings.create(model=EMBED_MODEL, input=texts).data
+        ]
+    if EMBED_PROVIDER != "local_hash":
+        raise ValueError(
+            "FOODIE_EMBED_PROVIDER must be 'local_hash' or 'openai', "
+            f"got {EMBED_PROVIDER!r}"
+        )
+    return [_local_hash_embedding(text) for text in texts]
+
+
+def _local_hash_embedding(text: str) -> list[float]:
+    vector = [0.0] * LOCAL_EMBED_DIM
+    tokens = TOKEN_PATTERN.findall(text.lower())
+    for token in tokens:
+        digest = hashlib.sha256(token.encode("utf-8")).digest()
+        index = int.from_bytes(digest[:4], "big") % LOCAL_EMBED_DIM
+        sign = 1.0 if digest[4] % 2 == 0 else -1.0
+        vector[index] += sign
+
+    norm = math.sqrt(sum(value * value for value in vector))
+    if not norm:
+        return vector
+    return [value / norm for value in vector]
 
 
 def _metadata(row: dict[str, Any]) -> dict[str, Any]:
@@ -171,7 +206,10 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None)
     args = parser.parse_args()
     count = build_vector_db(reset=args.reset, limit=args.limit)
-    print(f"foodie vector DB ready: {count:,} places -> {CHROMA_PATH}")
+    print(
+        f"foodie vector DB ready: {count:,} places -> {CHROMA_PATH} "
+        f"(provider={EMBED_PROVIDER})"
+    )
 
 
 if __name__ == "__main__":

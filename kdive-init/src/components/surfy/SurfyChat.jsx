@@ -7,7 +7,7 @@ import { useSurfyChat } from './surfyChatStore';
 
 export default function SurfyChat() {
   const { activeChat, sendUserMessage, handleSuggestionClick } = useSurfyChat();
-  const { activeAlbum, currentIdx, likedPlaceKeys } = useKdive();
+  const { activeAlbum, currentIdx, likedPlaceKeys, likedFoodKeys } = useKdive();
   const conversationRef = useRef(null);
   const [draft, setDraft] = useState('');
   const [tripMode, setTripMode] = useState('Before trip');
@@ -22,9 +22,15 @@ export default function SurfyChat() {
   const buildUserContext = () => {
     const album = activeAlbum || ALBUMS[currentIdx];
     const musicKeywords = album?.vibe ? album.vibe.split('·').map((k) => k.trim()).filter(Boolean) : [];
+    const nameFromKey = (key) => key.split('::')[1] || key;
+    const foodNameFromKey = (key) => {
+      const parts = key.split('::');
+      return [parts[1], parts[2]].filter(Boolean).join(' ');
+    };
     return {
       music_keywords: musicKeywords,
-      liked_places: Array.from(likedPlaceKeys).slice(0, 10).map((key) => ({ key })),
+      liked_places: Array.from(likedPlaceKeys).slice(0, 10).map((key) => ({ key, name: nameFromKey(key), category: '관광지' })),
+      liked_foods: Array.from(likedFoodKeys).slice(0, 10).map((key) => ({ key, name: foodNameFromKey(key), category: '맛집' })),
       extras: {
         trip_mode: tripMode,
         active_track: album ? { title: album.title, artist: album.artist, vibe: album.vibe } : null,
@@ -68,6 +74,19 @@ export default function SurfyChat() {
 
       <div ref={conversationRef} className="min-h-0 overflow-y-auto overflow-x-hidden py-[18px] pb-7 flex flex-col gap-[18px] scrollbar-thin">
         {activeChat?.messages.map((message, idx) => {
+          if (message.kind === 'status') {
+            return (
+              <article
+                key={`status-${idx}`}
+                className="self-start max-w-[76%] max-[768px]:max-w-full flex items-end gap-3"
+              >
+                <span className="kd-surfy-avatar" aria-hidden="true" />
+                <div className="rounded-[8px] py-[10px] px-[13px] text-[12px] leading-[1.5] bg-accent-soft text-accent-dark border border-accent-border">
+                  <p>{message.content}</p>
+                </div>
+              </article>
+            );
+          }
           if (message.kind === 'suggestions') {
             return (
               <div
@@ -87,6 +106,38 @@ export default function SurfyChat() {
                     </span>
                     <strong className="block text-[15px] leading-[1.35]">{card.name}</strong>
                   </button>
+                ))}
+              </div>
+            );
+          }
+          if (message.kind === 'foodie_recommendations') {
+            return (
+              <div
+                key={`foodie-${idx}`}
+                className="grid grid-cols-3 gap-[10px] w-[min(760px,100%)] ml-[46px] max-[980px]:grid-cols-1 max-[980px]:ml-0"
+                aria-label="Foodie 추천 장소"
+              >
+                {message.cards.map((card) => (
+                  <article
+                    key={card.kakao_place_id || card.name}
+                    className="min-h-[206px] border border-[rgba(0,0,0,0.08)] rounded-[8px] bg-white p-[16px] text-left flex flex-col gap-[10px] shadow-[0_10px_24px_rgba(0,0,0,0.04)]"
+                  >
+                    <div className="min-w-0">
+                      <div className="text-[11px] text-accent font-bold leading-[1.3] mb-[5px]">
+                        {[card.gu, card.category].filter(Boolean).join(' · ') || 'Foodie pick'}
+                      </div>
+                      <strong className="block text-[15px] leading-[1.35] text-text">{card.name}</strong>
+                    </div>
+                    <p className="text-[12px] text-black/55 leading-[1.5] min-h-[36px]">{card.address || '주소 정보 준비 중'}</p>
+                    <div className="flex flex-wrap gap-[6px]">
+                      {card.rating ? <span className="h-[24px] px-[8px] rounded-full bg-[#f6f6f6] text-[11px] text-text flex items-center">평점 {card.rating}</span> : null}
+                      {card.review_count ? <span className="h-[24px] px-[8px] rounded-full bg-[#f6f6f6] text-[11px] text-text flex items-center">리뷰 {card.review_count}</span> : null}
+                      {card.matched_preferences?.slice(0, 2).map((tag) => (
+                        <span key={tag} className="h-[24px] px-[8px] rounded-full bg-accent-soft text-[11px] text-accent-dark flex items-center">{tag}</span>
+                      ))}
+                    </div>
+                    <p className="text-[12px] text-black/65 leading-[1.6] mt-auto">{card.curation || card.ranking_basis}</p>
+                  </article>
                 ))}
               </div>
             );

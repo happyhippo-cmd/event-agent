@@ -7,7 +7,7 @@ from apps.agents.state import AGENT_FOODIE, KDiveState
 
 from .schemas import FoodieAgentResult, FoodieCandidate
 
-DEFAULT_TOP_K = 5
+DEFAULT_TOP_K = 3
 
 
 def build_foodie_query(taste_context: dict[str, Any]) -> str:
@@ -50,11 +50,12 @@ def run_foodie_agent(
 
     query = build_foodie_query(taste_context)
     suppressed = set(taste_context.get("suppressed_keywords") or [])
+    location_keywords = list(taste_context.get("location_keywords") or [])
 
     try:
         from .vector_store import query_places
 
-        rows = query_places(query=query, top_k=top_k + len(suppressed))
+        rows = query_places(query=query, top_k=max(top_k * 12, 30) + len(suppressed))
     except Exception as exc:
         result = FoodieAgentResult(
             status="error",
@@ -67,8 +68,15 @@ def run_foodie_agent(
         )
         return result.model_dump()
 
+    preferred_rows = [row for row in rows if _matches_location(row, location_keywords)]
+    preferred_ids = {row.get("kakao_place_id") for row in preferred_rows}
+    fallback_rows = [row for row in rows if row.get("kakao_place_id") not in preferred_ids]
+    candidate_rows = preferred_rows + fallback_rows
+
     candidates: list[FoodieCandidate] = []
-    for row in rows:
+    for row in candidate_rows:
+        if _is_unavailable_place(row):
+            continue
         if _matches_suppressed(row, suppressed):
             continue
         candidates.append(_candidate_from_row(row, taste_context))
@@ -135,7 +143,45 @@ def _candidate_from_row(
         similarity_score=float(row.get("similarity_score") or 0.0),
         matched_preferences=matched,
         ranking_basis=" / ".join(basis_parts) or "enriched DB 벡터 유사도 기준",
+        curation=_build_curation(row, mood_tags, matched),
     )
+
+
+def _build_curation(
+    row: dict[str, Any],
+    mood_tags: dict[str, Any],
+    matched: list[str],
+) -> str:
+    name = str(row.get("name", "이 장소"))
+    gu = str(row.get("gu") or "").strip()
+    category = str(row.get("category") or "맛집").strip()
+    atmosphere = mood_tags.get("atmosphere") or []
+    features = mood_tags.get("features") or []
+    occasion = mood_tags.get("occasion") or []
+    who = mood_tags.get("who") or []
+
+    tag_phrase = ", ".join(
+        str(item)
+        for item in [*atmosphere[:2], *features[:2], *occasion[:1], *who[:1]]
+        if item
+    )
+    preference_phrase = ", ".join(matched[:3])
+
+    intro = f"{name}은"
+    if gu:
+        intro += f" {gu}에서"
+    intro += f" {category} 무드로 고른 후보예요."
+
+    if preference_phrase and tag_phrase:
+        return (
+            f"{intro} 요청에서 드러난 {preference_phrase} 취향과 "
+            f"{tag_phrase} 태그가 맞물려서, 지금의 분위기를 이어가기 좋아요."
+        )
+    if tag_phrase:
+        return f"{intro} {tag_phrase} 태그가 강하게 잡혀 있어서 취향 기반 탐색 후보로 적합해요."
+    if preference_phrase:
+        return f"{intro} {preference_phrase} 취향과의 벡터 유사도가 높아 우선 추천했어요."
+    return f"{intro} mood_tags 벡터 유사도가 높아 우선 추천했어요."
 
 
 def _preference_terms(taste_context: dict[str, Any]) -> list[str]:
@@ -184,6 +230,30 @@ def _matches_suppressed(row: dict[str, Any], suppressed: set[str]) -> bool:
         ]
     )
     return any(term and term in haystack for term in suppressed)
+
+
+def _matches_location(row: dict[str, Any], location_keywords: list[str]) -> bool:
+    if not location_keywords:
+        return False
+    haystack = " ".join(
+        [
+            str(row.get("name", "")),
+            str(row.get("gu", "")),
+            str(row.get("address", "")),
+        ]
+    )
+    return any(keyword and keyword in haystack for keyword in location_keywords)
+
+
+def _is_unavailable_place(row: dict[str, Any]) -> bool:
+    haystack = " ".join(
+        [
+            str(row.get("name", "")),
+            str(row.get("address", "")),
+            str(row.get("document", "")),
+        ]
+    )
+    return any(term in haystack for term in ("휴업", "폐업", "영업종료"))
 
 
 def _parse_mood_tags(raw: Any) -> dict[str, Any]:

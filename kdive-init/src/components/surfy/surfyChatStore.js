@@ -31,6 +31,14 @@ const SURFY_CHAT_API_URL = typeof window !== 'undefined' && window.KDIVE_CHAT_AP
   ? window.KDIVE_CHAT_API_URL
   : 'http://localhost:8000/api/chat/';
 
+const FOODIE_STATUS_MESSAGES = [
+  'Supervisor가 사용자의 입력에서 취향과 의도를 분석하고 있어요.',
+  'Foodie Agent를 불러올게요.',
+  'Foodie Agent가 사용자 맞춤 장소를 선정하고 있어요.',
+];
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const INITIAL_CHATS = [
   { id: 'prototype', title: '채팅 기록 1', preview: '현재 대화 prototype', messages: SURFY_PROTOTYPE_MESSAGES },
 ];
@@ -81,46 +89,42 @@ export function useSurfyChat() {
     notify();
   }, []);
 
-  const replaceLastAssistant = useCallback((content) => {
-    _state = {
-      ..._state,
-      chats: _state.chats.map((c) => {
-        if (c.id !== _state.activeChatId) return c;
-        const msgs = [...c.messages];
-        for (let i = msgs.length - 1; i >= 0; i -= 1) {
-          if (msgs[i].role === 'assistant' && msgs[i].loading) {
-            msgs[i] = { ...msgs[i], content, loading: false };
-            break;
-          }
-        }
-        return { ...c, messages: msgs };
-      }),
-    };
-    notify();
-  }, []);
-
   const sendUserMessage = useCallback(async (text, userContext) => {
     if (!text?.trim()) return;
     appendMessage({ role: 'user', kind: 'text', content: text.trim() });
     const history = state.chats.find((c) => c.id === state.activeChatId)?.messages.filter((m) => m.kind === 'text') || [];
-    appendMessage({ role: 'assistant', kind: 'text', content: 'Surfy is thinking...', loading: true, wide: true });
+    const request = fetch(SURFY_CHAT_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: text,
+        user_context: userContext,
+        history: history.map(({ role, content }) => ({ role, content })),
+      }),
+    });
+
     try {
-      const response = await fetch(SURFY_CHAT_API_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: text,
-          user_context: userContext,
-          history: history.map(({ role, content }) => ({ role, content })),
-        }),
-      });
+      for (const content of FOODIE_STATUS_MESSAGES) {
+        appendMessage({ role: 'assistant', kind: 'status', content, wide: true });
+        await wait(420);
+      }
+
+      const response = await request;
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data?.detail || 'request_failed');
-      replaceLastAssistant(data?.response || '응답을 받았지만 표시할 내용이 없어요.');
+      appendMessage({ role: 'assistant', kind: 'text', content: data?.response || '응답을 받았지만 표시할 내용이 없어요.', wide: true });
+      if (Array.isArray(data?.recommendations) && data.recommendations.length) {
+        appendMessage({
+          role: 'assistant',
+          kind: 'foodie_recommendations',
+          cards: data.recommendations.slice(0, 3),
+          wide: true,
+        });
+      }
     } catch (e) {
-      replaceLastAssistant('Agent server is not ready yet. Please run the Django server from README.md, then try again.');
+      appendMessage({ role: 'assistant', kind: 'text', content: 'Agent server is not ready yet. Please run the backend server from README.md, then try again.', wide: true });
     }
-  }, [appendMessage, replaceLastAssistant, state.activeChatId, state.chats]);
+  }, [appendMessage, state.activeChatId, state.chats]);
 
   const handleSuggestionClick = useCallback((cafeName) => {
     const text = SURFY_CAFE_CURATIONS[cafeName] || `${cafeName}에 대한 큐레이션을 준비하고 있어요.`;

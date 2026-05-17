@@ -22,6 +22,7 @@ class FoodieCandidate(BaseModel):
     similarity_score: float = Field(ge=0.0, le=1.0)
     matched_preferences: list[str] = Field(default_factory=list)
     ranking_basis: str = ""
+    curation: str = ""
 
 
 class FoodieAgentResult(BaseModel):

@@ -147,7 +147,7 @@ def run_onboarding_places(payload):
 
 
 def run_onboarding_foods(payload):
-    from apps.agents.workers.foodie.agent import recommend_nearby_foods_for_places
+    from apps.agents.workers.restaurant.agent import recommend_nearby_foods_for_places
 
     places = payload.get("places") or []
     return recommend_nearby_foods_for_places(
@@ -215,9 +215,14 @@ def run_chat_pipeline(payload):
         recommendations.extend(_format_foodie_recommendations(foodie_result))
 
     if AGENT_EVENT in target_agents:
-        event_result = _run_event_agent(effective_message)
+        event_result = _run_event_agent(
+            effective_message,
+            taste_context=result_state.get("taste_context", {}),
+            history=payload.get("history") or [],
+        )
         result_state["event_result"] = event_result
         agent_results["event"] = event_result
+        recommendations.extend(_format_event_recommendations(event_result))
 
     if AGENT_TOURIST in target_agents:
         tour_result = _run_tour_agent(effective_message)
@@ -469,20 +474,22 @@ def _name_from_key(key):
 
 
 def _run_foodie_agent(result_state, top_k):
-    from apps.agents.workers.foodie import run_foodie_agent_for_state
-    from apps.agents.workers.foodie.agent import run_nearby_foodie_agent
+    from apps.agents.workers.restaurant import run_restaurant_agent_for_state
+    from apps.agents.workers.restaurant.agent import run_nearby_restaurant_agent
 
     anchors = _resolve_nearby_anchors(result_state.get("taste_context", {}))
     if anchors:
         result_state = dict(result_state)
-        result_state["foodie_result"] = run_nearby_foodie_agent(
+        result = run_nearby_restaurant_agent(
             anchors=anchors,
             taste_context=result_state.get("taste_context", {}),
             top_k=top_k,
             radius_km=2.0,
         )
+        result_state["foodie_result"] = result
+        result_state["restaurant_result"] = result
         return result_state
-    return run_foodie_agent_for_state(result_state, top_k=top_k)
+    return run_restaurant_agent_for_state(result_state, top_k=top_k)
 
 
 def _resolve_nearby_anchors(taste_context):
@@ -510,16 +517,22 @@ def _resolve_nearby_anchors(taste_context):
     return anchors
 
 
-def _run_event_agent(user_message):
-    return {
-        "status": "not_configured",
-        "message": (
-            "전시/팝업/공연처럼 현재 열리는 이벤트는 아직 Event Agent 데이터가 연결되지 않았어요. "
-            "실시간 전시 추천은 Event Agent를 붙인 뒤에 정확히 제공할 수 있습니다."
-        ),
-        "query": user_message,
-        "recommended_events": [],
-    }
+def _run_event_agent(user_message, taste_context=None, history=None):
+    try:
+        from apps.agents.workers.event import run_event_agent
+
+        return run_event_agent(
+            query=user_message,
+            taste_context=taste_context or {},
+            history=history or [],
+            top_k=3,
+        )
+    except Exception as exc:
+        return {
+            "status": "error",
+            "message": f"Event Agent 실행 중 오류가 발생했어요: {exc}",
+            "recommended_events": [],
+        }
 
 
 def _run_tour_agent(user_message):
@@ -606,6 +619,33 @@ def _format_tour_recommendations(tour_result):
     return recommendations
 
 
+def _format_event_recommendations(event_result):
+    if event_result.get("status") != "ok":
+        return []
+
+    recommendations = []
+    for event in (event_result.get("recommended_events") or [])[:3]:
+        title = event.get("title") or event.get("name")
+        recommendations.append(
+            {
+                "source_agent": "event",
+                "id": event.get("id") or event.get("detail_url") or title,
+                "name": title,
+                "category": event.get("category") or "이벤트",
+                "area": event.get("region") or event.get("location"),
+                "address": event.get("location") or event.get("address"),
+                "photo_url": _first_present(event, ("photo_url", "thumbnail_url", "image_url")),
+                "photo_urls": _photo_urls(event),
+                "event_date": event.get("date"),
+                "detail_url": event.get("detail_url"),
+                "matched_preferences": event.get("hashtags", [])[:2],
+                "ranking_basis": event.get("reason", ""),
+                "curation": event.get("curation") or event.get("reason") or event.get("description", ""),
+            }
+        )
+    return recommendations
+
+
 def _first_present(data, keys):
     for key in keys:
         value = data.get(key)
@@ -616,7 +656,7 @@ def _first_present(data, keys):
 
 def _photo_urls(data):
     urls = []
-    for key in ("photo_url", "image_url", "firstimage", "firstimage2"):
+    for key in ("photo_url", "thumbnail_url", "image_url", "firstimage", "firstimage2"):
         value = data.get(key)
         if value and value not in urls:
             urls.append(value)
@@ -665,6 +705,8 @@ def _tour_category_label(category):
 
 def _build_recommendation_response(recommendations, target_agents, taste_context=None):
     names = ", ".join(item["name"] for item in recommendations if item.get("name"))
+    if "event" in target_agents and "foodie" not in target_agents and "tourist" not in target_agents:
+        return f"좋아요. 지금 요청에 맞는 이벤트 3곳을 골랐어요: {names}"
     if "foodie" in target_agents and "tourist" in target_agents:
         return f"좋아요. 맛집과 관광지를 함께 보고 어울리는 장소 3곳을 골랐어요: {names}"
     if "tourist" in target_agents:

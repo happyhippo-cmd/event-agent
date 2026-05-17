@@ -10,9 +10,16 @@ const getRecommendationKey = (card) => `${card.source_agent || 'agent'}-${card.i
 
 const getFallbackEmoji = (card) => {
   if (card.source_agent === 'tourist') return '🏛️';
+  if (card.source_agent === 'event') return '🎟️';
   const category = `${card.category || ''} ${card.name || ''}`;
   if (category.includes('카페') || category.includes('커피') || category.includes('찻집')) return '☕';
   return '🍽️';
+};
+
+const getAgentPickLabel = (sourceAgent) => {
+  if (sourceAgent === 'tourist') return 'Tour pick';
+  if (sourceAgent === 'event') return 'Event pick';
+  return 'Foodie pick';
 };
 
 export default function SurfyChat() {
@@ -173,7 +180,7 @@ export default function SurfyChat() {
                       ) : null}
                       <div className="min-w-0">
                         <div className="text-[11px] text-accent font-bold leading-[1.3] mb-[5px]">
-                          {[card.source_agent === 'tourist' ? 'Tour pick' : 'Foodie pick', card.area || card.gu, card.category].filter(Boolean).join(' · ')}
+                          {[getAgentPickLabel(card.source_agent), card.area || card.gu, card.category].filter(Boolean).join(' · ')}
                         </div>
                         <strong className="block text-[15px] leading-[1.35] text-text">{card.name}</strong>
                       </div>

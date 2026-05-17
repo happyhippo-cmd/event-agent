@@ -13,6 +13,7 @@ from typing_extensions import TypedDict, NotRequired
 # Agent 라우팅 옵션
 AGENT_TOURIST = "tourist"
 AGENT_FOODIE = "foodie"
+AGENT_RESTAURANT = "restaurant"
 AGENT_EVENT = "event"
 
 # 가중치 (Q2 가중치 룰)
@@ -104,6 +105,7 @@ class KDiveState(TypedDict):
     # ===== Worker Agent 결과 (병합용) =====
     tourist_result: NotRequired[dict]
     foodie_result: NotRequired[dict]
+    restaurant_result: NotRequired[dict]
     event_result: NotRequired[dict]
 
     # ===== 최종 응답 =====

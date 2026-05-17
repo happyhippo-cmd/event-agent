@@ -14,7 +14,7 @@ Django API 자리입니다. 현재 폴더에는 **임시 더미 서버**만 있�
 대표 키: `DJANGO_SECRET_KEY`, `DJANGO_DEBUG`, `DATABASE_URL`, `OPENAI_API_KEY` 등.
 
 ## Foodie Agent
-- `data/foodie_enriched.dh`의 `enriched_places` 테이블을 사용합니다.
+- `data/foodie_enriched.db`의 `enriched_places` 테이블을 사용합니다.
 - `mood_tags_naver`가 있으면 우선 사용하고, 없으면 `mood_tags`를 사용합니다.
 - 벡터 DB 생성:
 

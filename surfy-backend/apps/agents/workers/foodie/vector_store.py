@@ -12,7 +12,7 @@ from openai import OpenAI
 
 BASE_DIR = Path(__file__).resolve().parents[4]
 DATA_DIR = BASE_DIR / "data"
-ENRICHED_DB_PATH = Path(os.getenv("ENRICHED_DB_PATH", DATA_DIR / "foodie_enriched.dh"))
+ENRICHED_DB_PATH = Path(os.getenv("ENRICHED_DB_PATH", DATA_DIR / "foodie_enriched.db"))
 CHROMA_PATH = Path(os.getenv("FOODIE_CHROMA_PATH", DATA_DIR / "chroma_db"))
 COLLECTION_NAME = os.getenv("FOODIE_CHROMA_COLLECTION", "foodie_places")
 EMBED_MODEL = os.getenv("FOODIE_EMBED_MODEL", "text-embedding-3-small")
@@ -34,22 +34,19 @@ def _mood_dict(raw: str | None) -> dict[str, list[str]]:
 
 
 def make_place_text(row: dict[str, Any]) -> str:
+    """Convert only mood tags into embedding text.
+
+    Place identity stays in Chroma metadata so similarity is mood-based while
+    search results can still be mapped back to a concrete place.
+    """
+
     mood = _mood_dict(row.get("mood_tags"))
-    mood_words: list[str] = []
+    parts: list[str] = []
     for key in ("who", "occasion", "atmosphere", "features", "price_feel"):
         values = mood.get(key) or []
-        mood_words.extend(str(v) for v in values)
-
-    category = (row.get("category_name") or "").split(" > ")[-1]
-    parts = [
-        row.get("name"),
-        row.get("gu"),
-        category,
-        row.get("address"),
-        row.get("road_address"),
-        " ".join(mood_words),
-    ]
-    return " | ".join(str(part) for part in parts if part)
+        if values:
+            parts.append(f"{key}: {' '.join(str(v) for v in values)}")
+    return " | ".join(parts)
 
 
 def _load_enriched_rows() -> list[dict[str, Any]]:
@@ -79,7 +76,7 @@ def get_collection() -> chromadb.Collection:
 
 
 def build_vector_db(reset: bool = False, limit: int | None = None) -> int:
-    """Build or update the Chroma vector DB from foodie_enriched.dh."""
+    """Build or update the Chroma vector DB from foodie_enriched.db."""
 
     CHROMA_PATH.mkdir(parents=True, exist_ok=True)
     chroma = chromadb.PersistentClient(path=str(CHROMA_PATH))

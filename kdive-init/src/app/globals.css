@@ -143,7 +143,7 @@
   .kd-spotify-embed iframe {
     display: block;
     width: 100% !important;
-    height: 120px !important;
+    height: 96px !important;
     border: 0;
     border-radius: 12px;
   }
@@ -186,10 +186,10 @@
       transform 0.24s ease;
   }
   .kd-food-card.active .kd-food-card-detail {
-    max-height: 160px;
+    max-height: 132px;
     opacity: 1;
-    margin-bottom: 16px;
-    padding-top: 12px;
+    margin-bottom: 12px;
+    padding-top: 10px;
     border-top-color: rgba(0, 0, 0, 0.08);
     transform: translateY(0);
   }
@@ -200,7 +200,7 @@
       background 0.2s;
   }
   .kd-food-card.active {
-    min-height: 244px;
+    min-height: 214px;
   }
 
   /* Transition overlay */

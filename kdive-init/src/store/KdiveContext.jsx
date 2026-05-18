@@ -1,12 +1,14 @@
 'use client';
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { ALBUMS, getPlaceKey } from '@/data/albums';
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { ALBUMS, MIN_TRACK_SELECTION, getPlaceKey } from '@/data/albums';
+import { getSurfyApiUrl } from '@/utils/surfyApi';
 
 const LIKED_STORAGE_KEY = 'kdive-liked-tracks';
 const LEGACY_LIKED_STORAGE_KEY = 'kdive-liked-albums';
 const LIKED_PLACES_STORAGE_KEY = 'kdive-liked-places';
 const LIKED_FOODS_STORAGE_KEY = 'kdive-liked-foods';
+const SHOULD_PERSIST_SELECTIONS = process.env.NODE_ENV === 'production';
 
 const KdiveContext = createContext(null);
 
@@ -17,7 +19,13 @@ export function KdiveProvider({ children }) {
   // 좋아요
   const [likedTrackIds, setLikedTrackIds] = useState(() => new Set());
   const [likedPlaceKeys, setLikedPlaceKeys] = useState(() => new Set());
+  const [likedPlaceRecords, setLikedPlaceRecords] = useState(() => ({}));
   const [likedFoodKeys, setLikedFoodKeys] = useState(() => new Set());
+  const [likedFoodRecords, setLikedFoodRecords] = useState(() => ({}));
+  const [onboardingPlaces, setOnboardingPlaces] = useState([]);
+  const [placesLoading, setPlacesLoading] = useState(false);
+  const [placesError, setPlacesError] = useState('');
+  const [placesRetryToken, setPlacesRetryToken] = useState(0);
   // 섹션 표시
   const [curationVisible, setCurationVisible] = useState(false);
   const [foodVisible, setFoodVisible] = useState(false);
@@ -35,6 +43,13 @@ export function KdiveProvider({ children }) {
   // localStorage hydration
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    if (!SHOULD_PERSIST_SELECTIONS) {
+      localStorage.removeItem(LIKED_STORAGE_KEY);
+      localStorage.removeItem(LEGACY_LIKED_STORAGE_KEY);
+      localStorage.removeItem(LIKED_PLACES_STORAGE_KEY);
+      localStorage.removeItem(LIKED_FOODS_STORAGE_KEY);
+      return;
+    }
     try {
       const rawTracks = localStorage.getItem(LIKED_STORAGE_KEY) || localStorage.getItem(LEGACY_LIKED_STORAGE_KEY) || '[]';
       const storedTracks = JSON.parse(rawTracks);
@@ -54,6 +69,13 @@ export function KdiveProvider({ children }) {
         ? stored.map((item) => (typeof item === 'string' ? item : item?.key)).filter(Boolean)
         : [];
       setLikedPlaceKeys(new Set(keys));
+      const records = {};
+      if (Array.isArray(stored)) {
+        stored.forEach((item) => {
+          if (item?.key && item?.place) records[item.key] = item.place;
+        });
+      }
+      setLikedPlaceRecords(records);
     } catch (e) {}
     try {
       const stored = JSON.parse(localStorage.getItem(LIKED_FOODS_STORAGE_KEY) || '[]');
@@ -61,12 +83,20 @@ export function KdiveProvider({ children }) {
         ? stored.map((item) => (typeof item === 'string' ? item : item?.key)).filter(Boolean)
         : [];
       setLikedFoodKeys(new Set(keys));
+      const records = {};
+      if (Array.isArray(stored)) {
+        stored.forEach((item) => {
+          if (item?.key && item?.food) records[item.key] = item.food;
+        });
+      }
+      setLikedFoodRecords(records);
     } catch (e) {}
   }, []);
 
   // 좋아요 영속화
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    if (!SHOULD_PERSIST_SELECTIONS) return;
     const list = ALBUMS.filter((a) => likedTrackIds.has(a.id)).map((a) => ({
       keyword: a.vibe,
     }));
@@ -74,21 +104,72 @@ export function KdiveProvider({ children }) {
       localStorage.setItem(LIKED_STORAGE_KEY, JSON.stringify(list));
       localStorage.removeItem(LEGACY_LIKED_STORAGE_KEY);
     } catch (e) {}
+  }, [likedTrackIds, placesRetryToken]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!SHOULD_PERSIST_SELECTIONS) return;
+    try {
+      localStorage.setItem(LIKED_PLACES_STORAGE_KEY, JSON.stringify(Array.from(likedPlaceKeys).map((key) => ({
+        key,
+        place: likedPlaceRecords[key],
+      }))));
+    } catch (e) {}
+  }, [likedPlaceKeys, likedPlaceRecords]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!SHOULD_PERSIST_SELECTIONS) return;
+    try {
+      localStorage.setItem(LIKED_FOODS_STORAGE_KEY, JSON.stringify(Array.from(likedFoodKeys).map((key) => ({
+        key,
+        food: likedFoodRecords[key],
+      }))));
+    } catch (e) {}
+  }, [likedFoodKeys, likedFoodRecords]);
+
+  useEffect(() => {
+    if (likedTrackIds.size < MIN_TRACK_SELECTION) {
+      setOnboardingPlaces([]);
+      setPlacesLoading(false);
+      setPlacesError('');
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    const tracks = ALBUMS.filter((album) => likedTrackIds.has(album.id)).map((album) => ({
+      id: album.id,
+      title: album.title,
+      artist: album.artist,
+      vibe: album.vibe,
+      seed_places: album.places,
+    }));
+
+    setPlacesLoading(true);
+    setPlacesError('');
+    fetch(getSurfyApiUrl('/api/onboarding/places/'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tracks, fixed_count: 2, per_keyword: 3 }),
+      signal: controller.signal,
+    })
+      .then((response) => response.json().then((data) => ({ response, data })).catch(() => ({ response, data: {} })))
+      .then(({ response, data }) => {
+        if (!response.ok) throw new Error(data?.detail || data?.message || 'places_request_failed');
+        setOnboardingPlaces(Array.isArray(data?.places) ? data.places : []);
+        setSelectedPlaceIndex(0);
+      })
+      .catch((error) => {
+        if (error.name === 'AbortError') return;
+        setPlacesError('관광지 추천을 불러오지 못했어요. 잠시 후 다시 시도해 주세요.');
+        setOnboardingPlaces([]);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setPlacesLoading(false);
+      });
+
+    return () => controller.abort();
   }, [likedTrackIds]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    try {
-      localStorage.setItem(LIKED_PLACES_STORAGE_KEY, JSON.stringify(Array.from(likedPlaceKeys).map((key) => ({ key }))));
-    } catch (e) {}
-  }, [likedPlaceKeys]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    try {
-      localStorage.setItem(LIKED_FOODS_STORAGE_KEY, JSON.stringify(Array.from(likedFoodKeys).map((key) => ({ key }))));
-    } catch (e) {}
-  }, [likedFoodKeys]);
 
   const scrollToSection = useCallback((sectionId, options = {}) => {
     if (typeof window === 'undefined') return;
@@ -131,47 +212,67 @@ export function KdiveProvider({ children }) {
   const prevCard = useCallback(() => goToIndex(currentIdx - 1), [currentIdx, goToIndex]);
 
   const toggleTrackLike = useCallback((albumId) => {
-    const alreadyLiked = likedTrackIds.has(albumId);
-    setLikedTrackIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(albumId)) next.delete(albumId);
-      else next.add(albumId);
-      return next;
-    });
-    // 원본: 좋아요 시 큐레이션 자동 표시
+    const next = new Set(likedTrackIds);
+    const alreadyLiked = next.has(albumId);
+    if (alreadyLiked) next.delete(albumId);
+    else next.add(albumId);
+    setLikedTrackIds(next);
+
     const album = ALBUMS.find((a) => a.id === albumId);
-    if (album && !alreadyLiked) {
+    if (album) {
       const idx = ALBUMS.findIndex((a) => a.id === albumId);
       if (idx >= 0) {
         setCurrentIdx(idx);
         setActiveAlbumId(albumId);
       }
+    }
+
+    if (next.size >= MIN_TRACK_SELECTION) {
       setCurationVisible(true);
       setFoodVisible(false);
       setSelectedPlaceIndex(0);
       setPlayerSlot('curation');
       scrollToSection('section-curation');
+      return;
     }
+
+    setCurationVisible(false);
+    setFoodVisible(false);
+    setPlayerSlot('onboarding');
   }, [likedTrackIds, scrollToSection]);
 
-  const togglePlaceLike = useCallback((albumId, placeName) => {
-    const key = getPlaceKey(albumId, placeName);
+  const togglePlaceLike = useCallback((albumId, placeName, explicitKey, placeRecord) => {
+    const key = explicitKey || getPlaceKey(albumId, placeName);
+    const shouldUnlike = likedPlaceKeys.has(key);
     setLikedPlaceKeys((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
       else next.add(key);
       return next;
     });
-  }, []);
+    setLikedPlaceRecords((records) => {
+      const nextRecords = { ...records };
+      if (shouldUnlike) delete nextRecords[key];
+      else if (placeRecord) nextRecords[key] = placeRecord;
+      return nextRecords;
+    });
+  }, [likedPlaceKeys]);
 
-  const toggleFoodLike = useCallback((foodKey) => {
+  const toggleFoodLike = useCallback((foodKey, foodRecord) => {
+    const shouldUnlike = likedFoodKeys.has(foodKey);
     setLikedFoodKeys((prev) => {
       const next = new Set(prev);
       if (next.has(foodKey)) next.delete(foodKey);
       else next.add(foodKey);
       return next;
     });
-  }, []);
+    setLikedFoodRecords((records) => {
+      const nextRecords = { ...records };
+      if (shouldUnlike) delete nextRecords[foodKey];
+      else if (foodRecord) nextRecords[foodKey] = foodRecord;
+      return nextRecords;
+    });
+  }, [likedFoodKeys]);
 
   const showAuth = useCallback(() => {
     setAuthVisible(true);
@@ -186,6 +287,9 @@ export function KdiveProvider({ children }) {
   const hideFood = useCallback(() => {
     setFoodVisible(false);
   }, []);
+  const retryOnboardingPlaces = useCallback(() => {
+    setPlacesRetryToken((value) => value + 1);
+  }, []);
   const showCurationForAlbum = useCallback((album) => {
     if (!album) return;
     const idx = ALBUMS.findIndex((a) => a.id === album.id);
@@ -197,8 +301,11 @@ export function KdiveProvider({ children }) {
     setSelectedPlaceIndex(0);
     setPlayerSlot('curation');
     setFoodVisible(false);
+    if (likedTrackIds.size >= MIN_TRACK_SELECTION && placesError) {
+      setPlacesRetryToken((value) => value + 1);
+    }
     scrollToSection('section-curation');
-  }, [scrollToSection]);
+  }, [likedTrackIds.size, placesError, scrollToSection]);
   const goBackToOnboarding = useCallback(() => {
     setCurationVisible(false);
     setFoodVisible(false);
@@ -234,7 +341,8 @@ export function KdiveProvider({ children }) {
 
   const value = useMemo(() => ({
     currentIdx, activeAlbum, activeAlbumId,
-    likedTrackIds, likedPlaceKeys, likedFoodKeys,
+    likedTrackIds, likedPlaceKeys, likedPlaceRecords, likedFoodKeys, likedFoodRecords,
+    onboardingPlaces, placesLoading, placesError,
     curationVisible, foodVisible, authVisible, loggedIn, activeAppPage,
     selectedPlaceIndex, setSelectedPlaceIndex,
     isPlaying, setIsPlaying,
@@ -243,17 +351,18 @@ export function KdiveProvider({ children }) {
     goToIndex, nextCard, prevCard,
     toggleTrackLike, togglePlaceLike, toggleFoodLike,
     showAuth, hideAuth, showFood, hideFood,
-    showCurationForAlbum, goBackToOnboarding, loginToSurfy, showAppPage,
+    retryOnboardingPlaces, showCurationForAlbum, goBackToOnboarding, loginToSurfy, showAppPage,
   }), [
     currentIdx, activeAlbum, activeAlbumId,
-    likedTrackIds, likedPlaceKeys, likedFoodKeys,
+    likedTrackIds, likedPlaceKeys, likedPlaceRecords, likedFoodKeys, likedFoodRecords,
+    onboardingPlaces, placesLoading, placesError,
     curationVisible, foodVisible, authVisible, loggedIn, activeAppPage,
     selectedPlaceIndex,
     isPlaying, waveformProgress, playerSlot,
     goToIndex, nextCard, prevCard,
     toggleTrackLike, togglePlaceLike, toggleFoodLike,
     showAuth, hideAuth, showFood, hideFood,
-    showCurationForAlbum, goBackToOnboarding, loginToSurfy, showAppPage,
+    retryOnboardingPlaces, showCurationForAlbum, goBackToOnboarding, loginToSurfy, showAppPage,
   ]);
 
   return <KdiveContext.Provider value={value}>{children}</KdiveContext.Provider>;

@@ -36,7 +36,7 @@ export default function SpotifyControllerPool({ album }) {
         title={`${album.title} by ${album.artist} on Spotify`}
         src={embedUrl}
         width="100%"
-        height="120"
+        height="96"
         allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
         loading="eager"
       />

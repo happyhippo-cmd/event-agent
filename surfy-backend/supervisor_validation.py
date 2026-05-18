@@ -22,8 +22,9 @@ sys.path.insert(0, os.path.dirname(__file__))
 from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
-from apps.agents.state import KDiveState, OnboardingData, PreviousTurn
+from apps.agents.state import AGENT_FOODIE, KDiveState, OnboardingData, PreviousTurn
 from apps.agents.supervisor import supervisor_intake, continue_after_clarification
+from apps.agents.workers.restaurant import run_restaurant_agent_for_state as run_foodie_agent_for_state
 
 # ============================================================
 # 더미 데이터 — 테스트용 가상 사용자 프로필
@@ -133,6 +134,26 @@ def print_result(state: KDiveState):
     print(f"      강화 키워드   : {taste.get('boosted_keywords', [])}")
     print(f"      억제 키워드   : {taste.get('suppressed_keywords', [])}")
 
+    # 4. Foodie worker 결과
+    if AGENT_FOODIE in target_agents:
+        foodie = state.get("foodie_result")
+        print()
+        print("  ▶  Foodie Agent 추천 결과")
+        if not foodie:
+            print("      (Foodie Agent가 아직 실행되지 않음)")
+        elif foodie.get("status") != "ok":
+            print(f"      상태: {foodie.get('status')}")
+            print(f"      메시지: {foodie.get('message')}")
+        else:
+            print(f"      검색 쿼리: {foodie.get('query')}")
+            for idx, place in enumerate(foodie.get("candidates", []), start=1):
+                print(
+                    f"      {idx}. {place['name']} "
+                    f"({place['gu']} / {place['category']})"
+                )
+                print(f"         주소: {place['address']}")
+                print(f"         근거: {place['ranking_basis']}")
+
     print()
     print_separator()
 
@@ -207,6 +228,8 @@ def main():
             # 되묻기가 필요한 경우 → 다음 입력을 위해 보관
             if result_state.get("needs_user_clarification"):
                 pending_clarification_state = result_state
+            else:
+                result_state = run_foodie_agent_for_state(result_state)
 
             print_result(result_state)
 

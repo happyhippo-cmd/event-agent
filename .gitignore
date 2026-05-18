@@ -36,3 +36,11 @@ ENV/
 
 # ===== 작업용 임시 파일 =====
 PR_*.md
+
+# ===== Local data / vector stores =====
+*.db
+*.sqlite
+*.sqlite3
+surfy-backend/data/
+**/chroma_db/
+**/*chroma_db/

@@ -21,7 +21,7 @@ export default function OnboardingSection() {
         Dive into Korea through <em className="italic text-accent">K-Pop</em>
       </h1>
       <p className="w-[min(1160px,calc(100%-clamp(48px,6vw,96px)))] mx-auto text-muted text-[16px] font-light leading-[1.55] max-w-[1160px] mb-[clamp(18px,3vh,28px)] max-[760px]:w-full max-[760px]:text-[15px]">
-        Pick a track that matches your mood.
+        Pick at least three tracks that match your mood.
         <br />
         We&apos;ll turn its rhythm into places, flavors, and moments to explore.
       </p>

@@ -16,3 +16,8 @@ local_settings.py
 # IDE
 .vscode/
 .idea/
+
+# DB / logs
+chroma_db/
+*.log
+server.log

@@ -36,7 +36,6 @@ export default function SurfyChat() {
   const conversationRef = useRef(null);
   const [draft, setDraft] = useState('');
   const [tripMode, setTripMode] = useState('Before trip');
-  const [expandedCurationKey, setExpandedCurationKey] = useState(null);
   const [imageErrorKeys, setImageErrorKeys] = useState(() => new Set());
 
   // 새 메시지가 추가되면 자동 스크롤
@@ -88,9 +87,6 @@ export default function SurfyChat() {
     setDraft('');
   };
 
-  const toggleCuration = (cardKey) => {
-    setExpandedCurationKey((current) => (current === cardKey ? null : cardKey));
-  };
 
   const markImageError = (cardKey) => {
     setImageErrorKeys((current) => new Set([...current, cardKey]));
@@ -171,19 +167,12 @@ export default function SurfyChat() {
                 {message.cards.map((card) => {
                   const cardKey = getRecommendationKey(card);
                   const hasPhoto = card.photo_url && !imageErrorKeys.has(cardKey);
-                  const isExpanded = expandedCurationKey === cardKey;
                   return (
                     <article
                       key={cardKey}
                       className="min-h-[286px] border border-[rgba(0,0,0,0.08)] rounded-[8px] bg-white p-[14px] text-left flex flex-col gap-[10px] shadow-[0_10px_24px_rgba(0,0,0,0.04)]"
                     >
-                      <button
-                        type="button"
-                        onClick={() => toggleCuration(cardKey)}
-                        aria-expanded={isExpanded}
-                        aria-label={`${card.name} 큐레이션 보기`}
-                        className="relative w-full aspect-[16/10] overflow-hidden rounded-[8px] border border-[rgba(0,0,0,0.06)] bg-[#f6f6f6] cursor-pointer"
-                      >
+                      <div className="relative w-full aspect-[16/10] overflow-hidden rounded-[8px] border border-[rgba(0,0,0,0.06)] bg-[#f6f6f6]">
                         {hasPhoto ? (
                           <img
                             src={card.photo_url}
@@ -196,17 +185,28 @@ export default function SurfyChat() {
                             {getFallbackEmoji(card)}
                           </span>
                         )}
-                      </button>
-                      {isExpanded ? (
+                      </div>
+                      {(card.curation || card.ranking_basis) ? (
                         <p className="text-[12px] text-black/65 leading-[1.6] rounded-[8px] bg-[#f8fbfc] border border-accent-border px-[11px] py-[10px]">
-                          {card.curation || card.ranking_basis || '큐레이션을 준비하고 있어요.'}
+                          {card.curation || card.ranking_basis}
                         </p>
                       ) : null}
                       <div className="min-w-0">
                         <div className="text-[11px] text-accent font-bold leading-[1.3] mb-[5px]">
                           {[getAgentPickLabel(card.source_agent), card.area || card.gu, card.category].filter(Boolean).join(' · ')}
                         </div>
-                        <strong className="block text-[15px] leading-[1.35] text-text">{card.name}</strong>
+                        {card.detail_url ? (
+                          <a
+                            href={card.detail_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="block text-[15px] leading-[1.35] text-text font-bold hover:text-accent hover:underline"
+                          >
+                            {card.name}
+                          </a>
+                        ) : (
+                          <strong className="block text-[15px] leading-[1.35] text-text">{card.name}</strong>
+                        )}
                       </div>
                       <p className="text-[12px] text-black/55 leading-[1.5] min-h-[36px]">{card.address || '주소 정보 준비 중'}</p>
                       <div className="flex flex-wrap gap-[6px] mt-auto">

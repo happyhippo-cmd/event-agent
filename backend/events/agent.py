@@ -16,11 +16,17 @@ from events.models import Event
 
 client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
-SYSTEM_PROMPT = """너는 K-Dive 서비스의 이벤트 큐레이터야.
-서울에서 열리는 팝업스토어·전시·이벤트 중 사용자 취향에 딱 맞는 걸 추천해줘.
-반드시 캐주얼하고 친근한 존댓말(~요, ~세요, ~드릴게요)을 사용해. 절대 반말(~해, ~야, ~줄게, ~있어)을 쓰지 마.
-각 이벤트마다 사용자 취향과 연결되는 추천 이유를 2~3문장으로 써줘.
-감성적이고 공감 가게 쓰되, 과장하거나 없는 내용 지어내지 마."""
+SYSTEM_PROMPT = """너는 K-Dive 서비스의 이벤트 큐레이터다.
+서울의 팝업스토어·전시·공연·페스티벌 중 사용자 요청과 맞는 후보를 골라 '왜 이게 좋은지'를 자연스럽게 설명한다.
+
+철칙:
+1) 후보 데이터(description, hashtags, mood_tags)에 명시되지 않은 사실은 절대 만들지 않는다.
+   작가·브랜드·아티스트의 외부 정보도 추측 금지.
+2) 추천 이유는 이벤트의 '컨셉/의도'를 먼저 드러내고, 그 다음 사용자 요청과 연결한다.
+3) 기계적·체크리스트형 표현 금지. "카테고리 부합", "키워드 매칭", "당신이 좋아하시는 'X'" 같은
+   메타적 설명 대신 이벤트의 실제 내용으로 설득한다.
+4) 친근한 존댓말(~요, ~세요, ~드릴게요) 유지. 반말(~해, ~야, ~줄게) 금지.
+5) description이 빈약한 콘서트는 무리해서 길게 쓰지 말고 사실 위주로 짧게."""
 
 
 # 서울 주요 지역명 — 쿼리에서 장소 의도를 감지하는 데 사용
@@ -58,8 +64,28 @@ BROAD_RESULT_THRESHOLD = 10  # 이 이상이면 결과 많다고 판단
 
 CATEGORY_KEYWORDS = {
     '전시': '전시',
+    '전시회': '전시',
+    # 페스티벌 & 약어
     '페스티벌': '페스티벌',
+    '페스타': '페스티벌',
+    '락페': '페스티벌',
+    '락 페스티벌': '페스티벌',
+    '재페': '페스티벌',
+    '재즈 페스티벌': '페스티벌',
+    '뮤직페스티벌': '페스티벌',
+    '뮤직 페스티벌': '페스티벌',
+    '뮤페': '페스티벌',
+    'EDM 페스티벌': '페스티벌',
+    'festival': '페스티벌',
+    'FESTIVAL': '페스티벌',
+    # 공연 & 약어
     '공연': '공연',
+    '콘서트': '공연',
+    '내한공연': '공연',
+    '내한': '공연',
+    '팬미팅': '공연',
+    '팬콘': '공연',
+    # 기타
     '박람회': '박람회',
     '팝업스토어': '팝업스토어',
     '팝업': '팝업스토어',
@@ -158,29 +184,66 @@ def detect_subcategory_filter(query: str, search_query: str) -> list[str]:
     return []
 
 
-def search_events(query: str, mood: str, limit: int = 20, sub_category_filter: list = None) -> list[Event]:
+def search_events(
+    query: str,
+    mood: str,
+    limit: int = 20,
+    sub_category_filter: list = None,
+    raw_query: str = "",
+    category_override: str = None,
+    performance_type: str = None,
+) -> list[Event]:
     """
     단계별 검색:
     1단계) 위치 + 키워드 모두 매칭
     2단계) 키워드만 매칭 (위치 조건 완화)
     3단계) 진행 중인 이벤트 최신순 (완전 폴백)
+
+    raw_query: LLM 가공 전 원본 사용자 발화. 카테고리 감지 fallback에 사용.
+    category_override: LLM이 직접 분류한 카테고리. 있으면 substring 매칭 건너뜀.
+    performance_type: 공연 세부유형 ('음악'|'연극'|'뮤지컬'|'클래식'). 공연 카테고리 안에서 추가 필터링.
     """
     today = timezone.localdate()
     active_qs = Event.objects.filter(
         Q(end_date__gte=today) | Q(end_date__isnull=True)
     )
 
-    # 쿼리에서 카테고리 감지
-    detected_category = None
-    for kw, cat in CATEGORY_KEYWORDS.items():
-        if kw in query or kw in mood:
-            detected_category = cat
-            break
+    # 카테고리 결정: LLM 분류 결과 우선, 없으면 substring 매칭 fallback
+    detected_category = category_override
+    if not detected_category:
+        detection_text = f"{query} {mood} {raw_query}"
+        for kw, cat in CATEGORY_KEYWORDS.items():
+            if kw in detection_text:
+                detected_category = cat
+                break
 
     if detected_category:
         active_qs = active_qs.filter(new_main_category=detected_category)
         if detected_category == '전시':
             active_qs = active_qs.exclude(commerciality='브랜드')
+        # 공연 세부유형 필터 (콘서트 vs 연극 vs 뮤지컬 vs 클래식)
+        if detected_category == '공연' and performance_type:
+            if performance_type == '음악':
+                # 음악 공연: new_sub_category='음악' 또는 sub_category가 음악 관련
+                active_qs = active_qs.filter(
+                    Q(new_sub_category='음악')
+                    | Q(sub_category__icontains='콘서트')
+                    | Q(sub_category__icontains='랩/힙합')
+                    | Q(sub_category__icontains='내한공연')
+                    | Q(sub_category__icontains='인디')
+                    | Q(sub_category__icontains='팬클럽')
+                    | Q(sub_category__icontains='페스티벌')
+                )
+            elif performance_type == '연극':
+                active_qs = active_qs.filter(sub_category__icontains='연극')
+            elif performance_type == '뮤지컬':
+                active_qs = active_qs.filter(sub_category__icontains='뮤지컬')
+            elif performance_type == '클래식':
+                active_qs = active_qs.filter(
+                    Q(sub_category__icontains='클래식')
+                    | Q(sub_category__icontains='오페라')
+                    | Q(sub_category__icontains='발레')
+                )
 
     # 서브카테고리 필터 (캐릭터전시, 설치미술 등 명시된 경우)
     if sub_category_filter:
@@ -262,11 +325,18 @@ def build_context(events: list[Event], preference: dict) -> str:
             date_str = str(ev.start_date)
             if ev.end_date:
                 date_str += f" ~ {ev.end_date}"
+        mood_tags = getattr(ev, "new_mood_tags", None) or getattr(ev, "mood_tags", []) or []
+        audience_tags = getattr(ev, "new_audience_tags", None) or getattr(ev, "audience_tags", []) or []
+        category = getattr(ev, "new_main_category", None) or getattr(ev, "main_category", "") or ""
+        subcategory = getattr(ev, "new_sub_category", None) or getattr(ev, "sub_category", "") or ""
         events_str += (
             f"{i}. [{ev.title}]\n"
+            f"   카테고리: {category} / {subcategory}\n"
             f"   장소: {ev.location}\n"
             f"   기간: {date_str}\n"
-            f"   설명: {ev.description[:200]}\n"
+            f"   분위기: {', '.join(mood_tags[:5]) if mood_tags else '-'}\n"
+            f"   타겟: {', '.join(audience_tags[:5]) if audience_tags else '-'}\n"
+            f"   설명: {ev.description[:500]}\n"
             f"   해시태그: {' '.join(ev.hashtags[:5])}\n\n"
         )
 
@@ -280,20 +350,35 @@ def curate_with_llm(events: list[Event], preference: dict, query: str) -> list[d
 
     context = build_context(events, preference)
 
-    prompt = f"""사용자 질문: "{query}"
+    prompt = f"""[사용자 질문] "{query}"
 
 {context}
 
-위 후보 이벤트 중 사용자 취향과 실질적으로 관련 있는 이벤트만 최대 5개 선정하세요.
-억지로 연결고리를 만들지 마세요. 관련 없는 이벤트는 제외하고, 관련 이벤트가 없으면 빈 배열을 반환하세요.
-아래 JSON 형식으로 응답하세요. 반드시 JSON만 출력하세요.
+위 후보 중 사용자 요청에 가장 잘 맞는 이벤트를 최대 5개 고르세요.
+
+각 이벤트에 대해 다음 순서로 사고하세요:
+  1) [의도] 이 이벤트가 '왜 열리는지/어떤 컨셉인지' description에서 추출해 한 문장으로 정리
+  2) [매칭] 사용자 질문/취향과 자연스럽게 이어지는 포인트를 description·태그 안에서 찾기
+  3) [추천 이유] 의도와 매칭을 자연스러운 문장으로 엮기 (2-3문장, 존댓말)
+
+**작성 규칙:**
+- description, hashtags, mood_tags에 실제로 있는 내용만 사용 (지어내기 금지)
+- 어색한 표현 금지: "당신이 좋아하시는 'X'", "~카테고리에 부합", "평소 선호하시는 동선"
+- 키워드를 따옴표로 박아넣지 않기 → 자연스러운 문장으로 녹이기
+- 작가명/브랜드명/컨셉 등 구체 정보를 우선 활용
+- "~한 분께 잘 맞아요" 같은 부드러운 연결 사용
+- 콘서트는 description이 빈약하므로 제목·아티스트·장소·날짜 중심으로 짧게
+
+억지로 연결하지 마세요. 관련 이벤트가 없으면 빈 배열을 반환하세요.
+반드시 JSON만 출력하세요:
 
 [
   {{
     "index": 1,
-    "reason": "추천 이유 (2~3문장)"
-  }},
-  ...
+    "intent": "이벤트의 의도/컨셉 한 문장",
+    "match_points": ["매칭 근거 1", "매칭 근거 2"],
+    "reason": "2-3문장의 자연스러운 추천 이유"
+  }}
 ]"""
 
     response = client.chat.completions.create(
@@ -339,36 +424,82 @@ def curate_with_llm(events: list[Event], preference: dict, query: str) -> list[d
 
 
 def extract_search_intent(messages: list[dict], query: str) -> dict:
-    """쿼리가 명확하면 검색, 애매하면 질문 반환"""
+    """
+    사용자 발화를 구조화된 검색 의도로 분류한다.
+
+    반환 예시:
+      검색 가능:
+        {"action": "search",
+         "category": "페스티벌" | "공연" | "전시" | "팝업스토어" | "박람회" | null,
+         "performance_type": "음악" | "연극" | "뮤지컬" | "클래식" | null,  # category="공연"일 때만 의미 있음
+         "genre_hint": "락" | "재즈" | "K-Pop" | "아이돌" | ... | null,
+         "location": "성수" | "홍대" | ... | null,
+         "keywords": "추가 검색어"}
+      질문 필요:
+        {"action": "ask", "message": "..."}
+
+    LLM이 카테고리/세부유형을 직접 분류하므로 새 약어/표현에 자동 대응.
+    """
     history = "\n".join(f"{m['role']}: {m['content'][:200]}" for m in messages[-4:])
     resp = client.chat.completions.create(
         model="gpt-4o-mini",
-        max_tokens=150,
+        max_tokens=300,
+        response_format={"type": "json_object"},
         messages=[{
             "role": "user",
             "content": (
                 f"대화:\n{history}\nuser: {query}\n\n"
-                "이 대화에서 이벤트 검색 키워드를 뽑아줘.\n"
-                "사용자가 조금이라도 힌트를 줬으면 그걸로 검색해. 키워드가 애매해도 최대한 search를 선택해.\n"
-                "사용자가 아무 맥락도 없이 첫 마디부터 '추천해줘'처럼 완전히 비어있을 때만 ask를 선택해.\n"
-                "ask를 선택할 때 message는 반드시 캐주얼한 존댓말(~요, ~세요)로 써줘. 절대 반말 금지. 예: '어떤 거 찾으세요? 팝업, 전시, 공연 등 다양하게 있어요!'\n"
-                "반드시 아래 JSON 형식 중 하나로만 답해:\n"
-                '{"action": "search", "keywords": "검색어"} 또는 {"action": "ask", "message": "질문 내용"}'
+                "사용자 발화의 검색 의도를 분류해서 JSON으로만 답해.\n\n"
+                "[action 결정]\n"
+                "- 사용자가 조금이라도 힌트(카테고리/장르/지역/분위기)를 줬으면 'search'\n"
+                "- 첫 마디부터 '추천해줘'처럼 완전히 비어있을 때만 'ask'\n"
+                "- ask일 때 message는 캐주얼한 존댓말. 예: '어떤 거 찾으세요? 팝업, 전시, 공연 등 다양하게 있어요!'\n\n"
+                "[category 분류 - 'search'일 때만]\n"
+                "반드시 아래 중 하나 또는 null:\n"
+                "- '전시' : 전시, 전시회, 미술관, 갤러리 등\n"
+                "- '공연' : 콘서트, 연극, 뮤지컬, 클래식, 내한, 팬콘, 팬미팅 등 모든 공연\n"
+                "- '페스티벌' : 페스티벌, 페스타, 락페, 재페, 뮤페, EDM 페스, rock fest 등\n"
+                "- '팝업스토어' : 팝업, 팝업스토어\n"
+                "- '박람회' : 박람회, 엑스포\n"
+                "- null : 카테고리 단서가 전혀 없을 때\n\n"
+                "[performance_type - category='공연'일 때만 채워라. 그 외엔 null]\n"
+                "공연 안에서 어떤 종류인지 구체화:\n"
+                "- '음악' : 콘서트, 아이돌, K-Pop, 힙합, 재즈, 락밴드, 인디, 발라드, 내한공연, 팬콘, 팬미팅 등 음악 공연\n"
+                "- '연극' : 연극\n"
+                "- '뮤지컬' : 뮤지컬\n"
+                "- '클래식' : 클래식, 오페라, 발레\n"
+                "- null : 공연 종류가 명시 안 됨\n"
+                "예: '아이돌 콘서트' → category='공연', performance_type='음악'\n"
+                "예: '재즈 공연' → category='공연', performance_type='음악'\n"
+                "예: '뮤지컬 보고싶어' → category='공연', performance_type='뮤지컬'\n\n"
+                "[genre_hint - 음악 장르나 전시/팝업 테마]\n"
+                "예: 락페 → genre_hint='락', 아이돌 콘서트 → genre_hint='아이돌'\n"
+                "예: 패션 팝업 → genre_hint='패션'\n"
+                "없으면 null.\n\n"
+                "[location - 서울/경기 지역명만]\n"
+                "예: '성수', '홍대', '강남', '잠실' 등. 일반 단어('서울')는 null.\n\n"
+                "[keywords - 위에 들어가지 않은 추가 검색어]\n"
+                "예: 분위기, 아티스트명, 브랜드명 등. 없으면 빈 문자열.\n\n"
+                "반환 예시:\n"
+                '{"action":"search","category":"공연","performance_type":"음악","genre_hint":"아이돌","location":null,"keywords":""}\n'
+                '{"action":"search","category":"페스티벌","performance_type":null,"genre_hint":"락","location":null,"keywords":""}\n'
+                '{"action":"search","category":"공연","performance_type":"뮤지컬","genre_hint":null,"location":null,"keywords":""}\n'
+                '{"action":"ask","message":"어떤 거 찾으세요? 팝업, 전시, 공연 등 다양하게 있어요!"}'
             )
         }]
     )
     raw = resp.choices[0].message.content.strip()
-    start = raw.find("{")
-    depth, end = 0, start
-    for i, ch in enumerate(raw[start:], start):
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                end = i + 1
-                break
-    return json.loads(raw[start:end])
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"action": "search", "category": None, "performance_type": None, "genre_hint": None, "location": None, "keywords": query}
+    if data.get("action") == "search":
+        data.setdefault("category", None)
+        data.setdefault("performance_type", None)
+        data.setdefault("genre_hint", None)
+        data.setdefault("location", None)
+        data.setdefault("keywords", "")
+    return data
 
 
 def chat(messages: list[dict], query: str) -> dict:
@@ -377,13 +508,27 @@ def chat(messages: list[dict], query: str) -> dict:
     if intent.get("action") == "ask":
         return {"message": intent["message"], "events": []}
 
-    search_query = intent.get("keywords", query)
-    detected_areas = [area for area in SEOUL_AREAS if area in query]
+    # LLM이 분류한 구조화 의도 (카테고리, 공연 세부유형, 장르, 지역, 부가 키워드)
+    category_override = intent.get("category")  # '페스티벌' | '공연' | '전시' | '팝업스토어' | '박람회' | None
+    performance_type = intent.get("performance_type")  # '음악' | '연극' | '뮤지컬' | '클래식' | None (category='공연'일 때만)
+    genre_hint = intent.get("genre_hint") or ""
+    intent_location = intent.get("location") or ""
+    extra_keywords = intent.get("keywords") or ""
+
+    # 검색용 키워드 문자열: 장르 힌트와 추가 키워드 합치기
+    search_query = " ".join(filter(None, [genre_hint, extra_keywords])).strip() or query
+
+    # 위치는 LLM이 뽑은 지역 우선, 없으면 원본에서 감지
+    detected_areas = []
+    if intent_location and intent_location in SEOUL_AREAS:
+        detected_areas = [intent_location]
+    else:
+        detected_areas = [area for area in SEOUL_AREAS if area in query]
     broad_location = '서울' if '서울' in query and not detected_areas else ""
     location_str = detected_areas[0] if detected_areas else (broad_location or "서울")
 
-    # 팝업 애매한 경우 → 카테고리 먼저 (전시 쿼리면 제외)
-    if is_vague_popup_query(query, search_query) and '전시' not in query and '전시' not in search_query:
+    # 팝업 카테고리인데 세부 분류 없음 → 카테고리 선택 화면
+    if category_override == '팝업스토어' and not detect_subcategory_filter(query, search_query):
         categories = get_available_categories(detected_areas, broad_location)
         return {
             "message": f"{location_str} 팝업이 정말 다양해요! 어떤 종류 팝업 관심 있으세요?",
@@ -394,7 +539,14 @@ def chat(messages: list[dict], query: str) -> dict:
         }
 
     sub_cat_filter = detect_subcategory_filter(query, search_query)
-    candidates = search_events(query=search_query, mood="", sub_category_filter=sub_cat_filter)
+    candidates = search_events(
+        query=search_query,
+        mood="",
+        sub_category_filter=sub_cat_filter,
+        raw_query=query,
+        category_override=category_override,
+        performance_type=performance_type,
+    )
 
     if not candidates:
         return {
@@ -450,14 +602,23 @@ def chat(messages: list[dict], query: str) -> dict:
     llm_messages = [
         {"role": "system", "content": (
             SYSTEM_PROMPT +
-            "\n반드시 캐주얼하고 친근한 존댓말(~요, ~세요, ~드릴게요)로만 응답해. 절대 반말(~해, ~야, ~줄게, ~있어, ~보여줄게) 쓰지 마. "
-            "아래 후보 이벤트들은 이미 사용자 검색어와 매칭된 이벤트들이야. "
-            "이 중에서 최대 5개를 골라 추천해줘. 후보가 있으면 반드시 1개 이상 추천해야 해. "
-            "추천 이유는 반드시 해당 이벤트의 실제 제목·장소·설명에 있는 내용만 써. "
-            "없는 내용은 지어내지 마. "
+            "\n\n[현재 작업]\n"
+            "후보 이벤트는 이미 사용자 검색어와 매칭됐어. 이 중 최대 5개를 골라 추천해.\n"
+            "후보가 있으면 반드시 1개 이상 추천. 관련 없으면 빈 배열.\n\n"
+            "[추천 이유 작성 절차 - 각 이벤트마다]\n"
+            "1) [의도] 이 이벤트가 '왜 열리는지/어떤 컨셉인지' description에서 추출해 한 문장으로 정리\n"
+            "2) [매칭] 사용자 질문/취향과 자연스럽게 이어지는 포인트를 description·태그 안에서 찾기\n"
+            "3) [이유] 의도와 매칭을 자연스러운 문장으로 엮어 2-3문장의 reason 작성\n\n"
+            "[금지 표현]\n"
+            "- \"당신이 좋아하시는 'X'\", \"~카테고리에 부합\", \"평소 선호하시는 동선\"\n"
+            "- 키워드를 따옴표로 박아넣기 → 자연스러운 문장으로 녹이기\n\n"
+            "[권장 표현]\n"
+            "- 작가명/브랜드명/컨셉 등 구체 정보 우선 사용\n"
+            "- \"~한 분께 잘 맞아요\" 같은 부드러운 연결\n"
+            "- 콘서트(공연)는 description 빈약하니 제목·아티스트·장소·날짜 위주로 짧게\n"
             + taste_instruction +
             "\n반드시 아래 JSON 형식으로만 응답해:\n"
-            '{"message": "대화형 소개 문장", "recommendations": [{"index": 1, "title": "후보 이벤트 제목 그대로", "reason": "추천 이유"}]}'
+            '{"message": "대화형 소개 문장", "recommendations": [{"index": 1, "title": "후보 이벤트 제목 그대로", "intent": "이벤트의 의도/컨셉 한 문장", "reason": "2-3문장의 자연스러운 추천 이유"}]}'
         )}
     ] + [
         {"role": m["role"], "content": m["content"]}

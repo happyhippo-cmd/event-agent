@@ -741,13 +741,14 @@ def _tour_category_label(category):
 
 def _build_recommendation_response(recommendations, target_agents, taste_context=None):
     names = ", ".join(item["name"] for item in recommendations if item.get("name"))
+    count = len(recommendations)
     if "event" in target_agents and "foodie" not in target_agents and "tourist" not in target_agents:
-        return f"좋아요. 지금 요청에 맞는 이벤트 3곳을 골랐어요: {names}"
+        return f"좋아요. 지금 요청에 맞는 이벤트 {count}곳을 골랐어요: {names}"
     if "foodie" in target_agents and "tourist" in target_agents:
-        return f"좋아요. 맛집과 관광지를 함께 보고 어울리는 장소 3곳을 골랐어요: {names}"
+        return f"좋아요. 맛집과 관광지를 함께 보고 어울리는 장소 {count}곳을 골랐어요: {names}"
     if "tourist" in target_agents:
-        return f"좋아요. 지금 요청에 맞는 관광지 3곳을 골랐어요: {names}"
-    return f"좋아요. {_foodie_taste_intro(taste_context or {})} 3군데를 가져왔어요: {names}"
+        return f"좋아요. 지금 요청에 맞는 관광지 {count}곳을 골랐어요: {names}"
+    return f"좋아요. {_foodie_taste_intro(taste_context or {})} {count}군데를 가져왔어요: {names}"
 
 
 def _foodie_taste_intro(taste_context):

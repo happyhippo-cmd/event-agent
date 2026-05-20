@@ -242,12 +242,27 @@ def run_chat_pipeline(payload):
 
     if recommendations:
         recommendations = recommendations[:3]
+        base_response = _build_recommendation_response(
+            recommendations,
+            target_agents,
+            result_state.get("taste_context", {}),
+        )
+        event_result = agent_results.get("event") or {}
+        if (
+            AGENT_EVENT in target_agents
+            and AGENT_FOODIE not in target_agents
+            and AGENT_TOURIST not in target_agents
+            and event_result.get("message")
+        ):
+            base_response = event_result["message"]
+        # event agent가 제약을 완화한 경우(예: 성수에 트로트 없어서 다른 지역도 봤음)
+        # 사용자에게 그 사실을 먼저 알린다.
+        event_relax = event_result.get("relaxation_note") or ""
+        if base_response.startswith(event_relax):
+            event_relax = ""
+        final_response = f"{event_relax} {base_response}".strip() if event_relax else base_response
         return {
-            "response": _build_recommendation_response(
-                recommendations,
-                target_agents,
-                result_state.get("taste_context", {}),
-            ),
+            "response": final_response,
             "route_decision": {
                 "target_agents": target_agents,
                 "taste_context": result_state.get("taste_context", {}),
@@ -741,13 +756,14 @@ def _tour_category_label(category):
 
 def _build_recommendation_response(recommendations, target_agents, taste_context=None):
     names = ", ".join(item["name"] for item in recommendations if item.get("name"))
+    count = len(recommendations)
     if "event" in target_agents and "foodie" not in target_agents and "tourist" not in target_agents:
-        return f"좋아요. 지금 요청에 맞는 이벤트 3곳을 골랐어요: {names}"
+        return f"좋아요. 지금 요청에 맞는 이벤트 {count}곳을 골랐어요: {names}"
     if "foodie" in target_agents and "tourist" in target_agents:
-        return f"좋아요. 맛집과 관광지를 함께 보고 어울리는 장소 3곳을 골랐어요: {names}"
+        return f"좋아요. 맛집과 관광지를 함께 보고 어울리는 장소 {count}곳을 골랐어요: {names}"
     if "tourist" in target_agents:
-        return f"좋아요. 지금 요청에 맞는 관광지 3곳을 골랐어요: {names}"
-    return f"좋아요. {_foodie_taste_intro(taste_context or {})} 3군데를 가져왔어요: {names}"
+        return f"좋아요. 지금 요청에 맞는 관광지 {count}곳을 골랐어요: {names}"
+    return f"좋아요. {_foodie_taste_intro(taste_context or {})} {count}군데를 가져왔어요: {names}"
 
 
 def _foodie_taste_intro(taste_context):

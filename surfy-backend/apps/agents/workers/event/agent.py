@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 from datetime import date
+from itertools import zip_longest
 from pathlib import Path
 from typing import Any
 
@@ -572,61 +573,58 @@ def _detect_subcategory_filter(query: str, mood: str) -> list[str]:
     return []
 
 
-def _keywords_matched(rows: list[dict[str, Any]], keywords: list[str]) -> bool:
-    """키워드가 결과에 실제로 하나라도 매칭됐는지 확인."""
-    if not keywords:
-        return True
-    for row in rows[:3]:
-        text = _row_text(row, ("title", "description", "hashtags", "music_genre",
-                               "mood_tags", "new_mood_tags", "audience_tags",
-                               "new_audience_tags", "new_sub_category"))
-        if any(kw.lower() in text.lower() for kw in keywords):
-            return True
-    return False
-
-
 def _merge_with_vector_search(
     keyword_results: list[dict[str, Any]],
     query: str,
     mood: str,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """키워드가 실제로 매칭되지 않았으면 벡터 검색 결과를 병합."""
+    """벡터 검색을 1차로 사용하고 키워드 검색 결과로 보완한다.
+
+    벡터(의미 기반)가 동의어·유사 표현을 잡고, 키워드(글자 매칭)는
+    아티스트명·브랜드명처럼 정확한 토큰이 필요한 케이스를 보충한다.
+    벡터 검색이 사용 불가하면 키워드 결과로 폴백한다.
+    """
     try:
         from apps.agents.workers.event.vector_store import get_events_by_ids, query_events
     except Exception:
         return keyword_results
 
-    detected_areas = [area for area in SEOUL_AREAS if area in query]
-    keywords = _event_keywords(query, mood, detected_areas)
-
-    # 키워드가 실제로 결과에 매칭됐으면 그대로 사용
-    if keyword_results and _keywords_matched(keyword_results, keywords):
-        return keyword_results
-
-    # 벡터 검색 실행 - mood는 중복 단어가 많으므로 사용자 쿼리만 사용
+    # 카테고리가 명확하면 필터링해서 검색, 결과 없으면 전체에서 재시도
     detected_category = _detect_category(query, mood)
     vector_results = query_events(
         query=query.strip(),
         top_k=limit,
         category_filter=detected_category,
     )
-    if not vector_results:
+    if not vector_results and detected_category:
         vector_results = query_events(query=query.strip(), top_k=limit)
 
     vector_ids = [r["event_id"] for r in vector_results if r.get("event_id")]
     vector_events = get_events_by_ids(vector_ids)
 
-    if not keyword_results:
-        return vector_events
+    # chroma 미빌드 등으로 벡터 검색 실패 → 키워드 결과로 폴백
+    if not vector_events:
+        return keyword_results
 
-    # 벡터 결과를 앞에 두고 기존 키워드 결과를 뒤에 병합 (중복 제거)
-    existing_ids = {str(e.get("id", "")) for e in vector_events}
-    merged = list(vector_events)
-    for ev in keyword_results:
-        if str(ev.get("id", "")) not in existing_ids:
-            merged.append(ev)
-    return merged[:limit]
+    # 두 신호를 라운드로빈으로 인터리브: 벡터 1개·키워드 1개씩 번갈아 채운다.
+    # 벡터 단독으로 limit 채우면 키워드 결과가 LLM 컨텍스트에 못 들어가므로
+    # 의미 기반/글자 매칭 둘 다 상위에 노출되도록 보장한다 (예: '아이돌 콘서트'에서
+    # 벡터가 인디 가수를 올려도 키워드가 잡은 실제 아이돌이 같은 후보 풀에 들어옴).
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for vec_ev, kw_ev in zip_longest(vector_events, keyword_results):
+        for candidate in (vec_ev, kw_ev):
+            if candidate is None:
+                continue
+            eid = str(candidate.get("id", ""))
+            if eid and eid in seen:
+                continue
+            seen.add(eid)
+            merged.append(candidate)
+            if len(merged) >= limit:
+                return merged
+    return merged
 
 
 def _extract_keywords(text: str) -> list[str]:

@@ -58,5 +58,5 @@ surfy-backend/data/
 **/yanolja_concerts*.json
 
 # ===== Exclude melon and yanolja folders =====
-melon/
-yanolja/
+멜론티켓/
+야놀자/

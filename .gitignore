@@ -36,6 +36,8 @@ ENV/
 
 # ===== 작업용 임시 파일 =====
 PR_*.md
+chat_ui.py
+*.log
 
 # ===== Local data / vector stores =====
 *.db

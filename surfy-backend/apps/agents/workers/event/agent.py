@@ -96,6 +96,33 @@ SEARCH_FIELDS = (
 # 힙하고 활동적인 이벤트를 우선 노출하기 위한 mood 가중치
 HIP_MOOD_TAGS = {"힙한", "트렌디한", "감각적인", "유니크한", "SNS감성", "활동적인", "이색적인", "핫플"}
 
+# 쿼리의 장르 키워드를 DB의 music_genre 값으로 매핑한다.
+# music_genre는 JSON 배열(예: '["K-pop 아이돌"]')로 저장되어 있다.
+# 사용자가 "아이돌"이라 했는데 닐로(인디)·버둥(인디)이 추천되는 회귀를 막기 위해
+# retrieval 결과를 LLM에 넘기기 전에 하드 필터로 거른다.
+GENRE_KEYWORDS = {
+    "아이돌": ("K-pop 아이돌",),
+    "K-pop": ("K-pop 아이돌",),
+    "k-pop": ("K-pop 아이돌",),
+    "kpop": ("K-pop 아이돌",),
+    "케이팝": ("K-pop 아이돌",),
+    "인디": ("인디",),
+    "재즈": ("재즈",),
+    "힙합": ("랩/힙합",),
+    "랩": ("랩/힙합",),
+    "락": ("록", "록/밴드"),
+    "록": ("록", "록/밴드"),
+    "밴드": ("록/밴드",),
+    "EDM": ("EDM",),
+    "edm": ("EDM",),
+    "트로트": ("트로트",),
+    "J-pop": ("J-pop",),
+    "j-pop": ("J-pop",),
+    "제이팝": ("J-pop",),
+    "내한": ("해외 아티스트",),
+    "해외": ("해외 아티스트",),
+}
+
 
 def run_event_agent(
     query: str,
@@ -125,6 +152,12 @@ def run_event_agent(
     ]
     if location_keywords:
         events = _filter_by_explicit_location(events, location_keywords)
+
+    # 음악 장르 하드 필터: "아이돌"이라 했는데 인디 가수가 추천되는 회귀를 막는다.
+    # music_genre가 명시적으로 다른 장르면 LLM이 보기 전에 제거.
+    genre_filter = _detect_genre_filter(query, mood)
+    if genre_filter:
+        events = _filter_by_genre(events, genre_filter)
 
     if not events:
         return {
@@ -283,6 +316,51 @@ def _filter_by_explicit_location(
             for area in location_keywords
         )
     ]
+
+
+def _detect_genre_filter(query: str, mood: str) -> list[str]:
+    """쿼리·mood에서 음악 장르 키워드를 잡아 DB music_genre 값 목록으로 변환."""
+    combined = f"{query} {mood}"
+    detected: list[str] = []
+    for keyword, db_values in GENRE_KEYWORDS.items():
+        if keyword in combined:
+            for value in db_values:
+                if value not in detected:
+                    detected.append(value)
+    return detected
+
+
+def _filter_by_genre(
+    rows: list[dict[str, Any]], genre_filter: list[str]
+) -> list[dict[str, Any]]:
+    """music_genre가 요청 장르와 명시적으로 다른 후보를 제거한다.
+
+    music_genre는 JSON 배열 문자열(예: '["K-pop 아이돌"]')로 저장. 빈 배열·
+    "모름"·"기타"는 분류 정보가 부족한 경우라 그대로 통과시키고, 명시적
+    장르가 있을 때만 매칭 여부로 판단한다.
+
+    예: 사용자 "아이돌 콘서트" → genre_filter=["K-pop 아이돌"]
+        - 닐로(["인디"]) → 명시적 다른 장르 → 제거
+        - I.O.I(["K-pop 아이돌"]) → 매칭 → 유지
+        - 분류 안 된 콘서트(["기타"]) → 정보 부족 → 유지
+    """
+    if not genre_filter:
+        return rows
+    filtered: list[dict[str, Any]] = []
+    ambiguous_tags = {"기타", "모름"}
+    for row in rows:
+        raw = row.get("music_genre") or ""
+        try:
+            tags = json.loads(raw) if isinstance(raw, str) and raw.startswith("[") else (raw if isinstance(raw, list) else [raw])
+        except (json.JSONDecodeError, TypeError):
+            tags = [raw] if raw else []
+        tags = [str(t) for t in tags if t]
+        if not tags or all(t in ambiguous_tags for t in tags):
+            filtered.append(row)
+            continue
+        if any(g in tags for g in genre_filter):
+            filtered.append(row)
+    return filtered
 
 
 def _event_keywords(query: str, mood: str, detected_areas: list[str]) -> list[str]:

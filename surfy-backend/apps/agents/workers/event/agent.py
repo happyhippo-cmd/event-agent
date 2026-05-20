@@ -117,6 +117,15 @@ def run_event_agent(
 
     events = _merge_with_vector_search(events, query=query, mood=mood, limit=20)
 
+    # 명시적 지역 제약은 하드 필터로 보장 (LLM 프롬프트만으로는 비결정적).
+    # 벡터 검색에 location 필터가 없어 merge에 타지역 후보가 섞이는데,
+    # LLM이 후보 풀에서 위반 후보를 못 보게 사전 제거한다.
+    location_keywords = [
+        str(loc) for loc in (taste_context or {}).get("location_keywords") or [] if loc
+    ]
+    if location_keywords:
+        events = _filter_by_explicit_location(events, location_keywords)
+
     if not events:
         return {
             "status": "no_results",
@@ -253,6 +262,27 @@ def _row_matches_subcategory(row: dict[str, Any], subcategories: list[str]) -> b
 def _row_matches_area(row: dict[str, Any], areas: list[str]) -> bool:
     haystack = _row_text(row, ("region", "location"))
     return any(area and area in haystack for area in areas)
+
+
+def _filter_by_explicit_location(
+    rows: list[dict[str, Any]], location_keywords: list[str]
+) -> list[dict[str, Any]]:
+    """사용자가 명시한 지역(location_keywords)에 해당하는 후보만 남긴다.
+
+    벡터 검색은 location 필터를 지원하지 않아서 merge 단계에서 다른 지역
+    이벤트가 섞여 들어온다. LLM 프롬프트의 0순위 룰만으로는 비결정적이라
+    하드 필터로 LLM이 위반 자체를 못 하게 한다. location/region/address에
+    부분 문자열 매칭한다.
+    """
+    if not location_keywords:
+        return rows
+    return [
+        row for row in rows
+        if any(
+            area and area in _row_text(row, ("location", "region", "address"))
+            for area in location_keywords
+        )
+    ]
 
 
 def _event_keywords(query: str, mood: str, detected_areas: list[str]) -> list[str]:

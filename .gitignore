@@ -44,3 +44,13 @@ PR_*.md
 surfy-backend/data/
 **/chroma_db/
 **/*chroma_db/
+
+# ===== Crawled ticket datasets (local/generated) =====
+멜론티켓/*.csv
+멜론티켓/*.json
+야놀자/*.csv
+야놀자/*.json
+**/melon_concerts*.csv
+**/melon_concerts*.json
+**/yanolja_concerts*.csv
+**/yanolja_concerts*.json

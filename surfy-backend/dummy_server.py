@@ -247,9 +247,19 @@ def run_chat_pipeline(payload):
             target_agents,
             result_state.get("taste_context", {}),
         )
+        event_result = agent_results.get("event") or {}
+        if (
+            AGENT_EVENT in target_agents
+            and AGENT_FOODIE not in target_agents
+            and AGENT_TOURIST not in target_agents
+            and event_result.get("message")
+        ):
+            base_response = event_result["message"]
         # event agent가 제약을 완화한 경우(예: 성수에 트로트 없어서 다른 지역도 봤음)
         # 사용자에게 그 사실을 먼저 알린다.
-        event_relax = (agent_results.get("event") or {}).get("relaxation_note") or ""
+        event_relax = event_result.get("relaxation_note") or ""
+        if base_response.startswith(event_relax):
+            event_relax = ""
         final_response = f"{event_relax} {base_response}".strip() if event_relax else base_response
         return {
             "response": final_response,

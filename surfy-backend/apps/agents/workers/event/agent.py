@@ -212,8 +212,7 @@ def run_event_agent(
             "recommended_events": [],
         }
 
-    names = ", ".join(item["title"] for item in curated[:top_k] if item.get("title"))
-    base_msg = f"좋아요. 지금 요청에 맞는 이벤트 {len(curated[:top_k])}곳을 골랐어요: {names}"
+    base_msg = _build_event_response_message(query, curate_taste_context, curated[:top_k])
     final_msg = f"{relax_note} {base_msg}".strip() if relax_note else base_msg
     return {
         "status": "ok",
@@ -240,6 +239,72 @@ def run_event_agent_for_state(state: KDiveState, top_k: int = DEFAULT_EVENT_TOP_
 
 def run(query: str, **kwargs: Any) -> dict[str, Any]:
     return run_event_agent(query=query, **kwargs)
+
+
+def _build_event_response_message(
+    query: str,
+    taste_context: dict[str, Any],
+    curated: list[dict[str, Any]],
+) -> str:
+    """Build a short user-facing summary that mirrors the user's request."""
+    query_text = query or ""
+    locations = [str(loc) for loc in (taste_context.get("location_keywords") or []) if loc]
+    suppressed = [str(item) for item in (taste_context.get("suppressed_keywords") or []) if item]
+    event_terms = _flatten_terms(taste_context, ("event_type_keywords", "current_mood_keywords"))
+    mood_terms = [
+        term
+        for term in _flatten_terms(taste_context, ("mood_keywords", "preferred_music"))
+        if term not in event_terms and term not in locations
+    ]
+
+    category_label = ""
+    for item in curated:
+        raw_category = str(item.get("category") or "").split(" · ")[0].strip()
+        if raw_category:
+            category_label = raw_category
+            break
+
+    object_term = ""
+    object_labels = ("팝업", "팝업스토어", "전시", "전시회", "공연", "콘서트", "페스티벌", "행사", "아트페어")
+    for term in event_terms:
+        if any(label in term for label in object_labels):
+            object_term = "팝업" if "팝업" in term else term
+            break
+    if not object_term:
+        for label in object_labels:
+            if label in query_text:
+                object_term = "팝업" if "팝업" in label else label
+                break
+    if not object_term:
+        object_term = category_label or "이벤트"
+
+    modifiers = []
+    if locations:
+        modifiers.append(locations[0])
+    if "재미" in query_text:
+        modifiers.append("재미있는")
+    elif mood_terms:
+        modifiers.append(mood_terms[0])
+    elif "감성" in query_text:
+        modifiers.append("감성적인")
+    elif "조용" in query_text or "차분" in query_text:
+        modifiers.append("차분한")
+
+    request_label = " ".join([*modifiers, object_term]).strip() or "요청한 분위기"
+
+    detail = "후보 중 요청과 가장 가까운 곳만 추렸어요."
+    if "아이돌" in query_text or "케이팝" in query_text.lower() or "k-pop" in query_text.lower():
+        detail = "인디나 솔로 공연은 빼고 K-pop 아이돌 무대 중심으로 봤어요."
+    elif suppressed:
+        detail = "말한 회피 조건은 빼고, 컨셉이나 체험 포인트가 보이는 후보로 추렸어요."
+    elif locations:
+        detail = f"{locations[0]} 안에서 실제로 갈 수 있는 후보만 남겼어요."
+    elif "감성" in query_text:
+        detail = "요란한 체험형보다 천천히 머물기 좋은 쪽을 우선했어요."
+    elif "팝업" in query_text:
+        detail = "사진만 찍고 끝나는 곳보다 둘러볼 거리나 체험 포인트가 있는 쪽을 우선했어요."
+
+    return f"좋아요. {request_label} 쪽으로 골라봤어요. {detail}"
 
 
 def search_events_from_db(query: str, mood: str = "", limit: int = 20) -> list[dict[str, Any]]:
@@ -634,7 +699,12 @@ def curate_events_with_llm(
                 "has_image": bool(_event_attr(event, "thumbnail_url")),
                 "mood_tags": _listish(_event_attr(event, "new_mood_tags") or _event_attr(event, "mood_tags"))[:5],
                 "audience_tags": _listish(_event_attr(event, "new_audience_tags") or _event_attr(event, "audience_tags"))[:5],
-                "description": str(_event_attr(event, "description") or "")[:500],
+                "intro_text": str(_event_attr(event, "description") or "")[:800],
+                "curation_summary": str(
+                    _event_attr(event, "vector_summary_v2")
+                    or _event_attr(event, "vector_summary")
+                    or ""
+                )[:350],
                 "hashtags": _listish(_event_attr(event, "hashtags"))[:5],
             }
         )
@@ -682,18 +752,26 @@ def curate_events_with_llm(
         "  · '힙합/랩' = 힙합 아티스트 공연. 인디 록·아이돌 제외.\n"
         "- 후보 중 사용자 요청과 맞는 게 **하나도 없으면 빈 배열 반환**. 억지로 채우지 마세요.\n"
         "- 모르는 아티스트는 추측하지 말고 제외하세요.\n\n"
+        "**전시/팝업 소개글 활용 규칙:**\n"
+        "- 전시·팝업은 intro_text와 curation_summary를 가장 중요한 근거로 사용하세요. "
+        "운영시간·주소 문구는 버리고, 콘텐츠/작가/브랜드 컨셉/프로그램/체험 요소를 뽑으세요.\n"
+        "- 추천 이유에는 소개글에서 나온 구체 명사 1개 이상을 자연스럽게 포함하세요. "
+        "예: '스윔 라인 최초 공개', 'DIY 글래스 꾸미기', '시간의 향', '작가의 작업 태도'.\n"
+        "- intro_text가 비어 있거나 단순 장소/시간뿐이면 curation_summary, hashtags, mood_tags 순서로 근거를 찾으세요.\n\n"
         "**각 선정 이벤트에 대해 다음 순서로 사고:**\n"
-        "  1) [의도] 이 이벤트가 '왜 열리는지/어떤 컨셉인지' description에서 추출해 한 문장으로 정리\n"
-        "  2) [매칭] 사용자 질문/취향과 자연스럽게 이어지는 포인트를 description·태그 안에서 찾기\n"
-        "  3) [추천 이유] 의도와 매칭을 자연스러운 문장으로 엮기 (2-3문장, 존댓말)\n\n"
+        "  1) [근거] intro_text/curation_summary에서 실제 콘텐츠 한 가지를 뽑기\n"
+        "  2) [매칭] 그 콘텐츠가 사용자 질문/취향과 어떻게 이어지는지 찾기\n"
+        "  3) [추천 이유] 근거와 매칭을 1-2문장으로 짧게 엮기 (존댓말)\n\n"
         "**작성 규칙:**\n"
-        "- 이벤트의 description, hashtags, mood_tags 등 후보 데이터에 실제로 있는 내용만 사용 "
+        "- 이벤트의 intro_text, curation_summary, hashtags, mood_tags 등 후보 데이터에 실제로 있는 내용만 사용 "
         "(이벤트 시간·장소·내용 등 구체 사실 지어내기 금지)\n"
         "- 단, 아티스트 분야/장르 판단에는 당신의 사전 지식 활용 가능\n"
         "- 어색한 표현 금지: \"당신이 좋아하시는 'X'\", \"~카테고리에 부합\", \"평소 선호하시는 동선\"\n"
+        "- 빈말 금지: \"특별한 경험\", \"깊은 감동\", \"감성적인 요소\", \"안성맞춤\", \"추천드립니다\"를 쓰지 마세요.\n"
+        "- 카드 안 reason은 길게 설명하지 말고 1-2문장으로 끝내세요.\n"
         "- 키워드를 따옴표로 박아넣지 않기 → 자연스러운 문장으로 녹이기\n"
         "- 작가명/브랜드명/컨셉 등 구체 정보를 우선 활용\n"
-        "- \"~한 분께 잘 맞아요\" 같은 부드러운 연결 사용\n"
+        "- \"~한 분께 잘 맞아요\", \"가볍게 들르기 좋아요\", \"천천히 보기 좋아요\" 같은 부드러운 연결 사용\n"
         "- 콘서트는 description이 빈약하므로 제목·아티스트·장소·날짜 중심으로 짧게 사실 위주\n\n"
         "JSON 형식으로만 반환 (맞는 후보 없으면 recommendations는 빈 배열):\n"
         "{\n"
@@ -702,7 +780,7 @@ def curate_events_with_llm(
         '      "index": 1,\n'
         '      "intent": "이벤트의 의도/컨셉 한 문장",\n'
         '      "match_points": ["매칭 근거 1", "매칭 근거 2"],\n'
-        '      "reason": "2-3문장의 자연스러운 추천 이유"\n'
+        '      "reason": "1-2문장의 짧고 구체적인 추천 이유"\n'
         '    }\n'
         '  ]\n'
         "}"
@@ -725,11 +803,12 @@ def curate_events_with_llm(
                         "(예: BTS·뉴진스·I.O.I = K-pop 아이돌, 닐로·문없는집 = 인디, 임영웅 = 트로트). "
                         "사용자가 특정 장르를 요청하면 후보 중 그 장르에 해당하는 것만 골라야 한다.\n"
                         "3) 사용자 요청에 맞는 후보가 없으면 억지로 채우지 말고 빈 배열 반환.\n"
-                        "4) 추천 이유는 이벤트의 '컨셉/의도'를 먼저 드러내고, 그 다음 사용자 요청과 연결한다.\n"
+                        "4) 전시·팝업 추천 이유는 intro_text/curation_summary의 소개글에서 컨셉·작가·브랜드·체험 요소를 뽑아 쓴다.\n"
                         "5) 기계적·체크리스트형 표현 금지. \"카테고리 부합\", \"키워드 매칭\" 같은 메타적 설명 대신 "
                         "이벤트의 실제 내용으로 설득한다.\n"
                         "6) 친근한 존댓말, 한국어 자연스러운 어투 유지.\n"
-                        "7) description이 빈약한 콘서트는 무리해서 길게 쓰지 말고 사실 위주로 짧게."
+                        "7) 빈말 금지: \"특별한 경험\", \"깊은 감동\", \"감성적인 요소\", \"안성맞춤\", \"추천드립니다\"를 쓰지 않는다.\n"
+                        "8) description이 빈약한 콘서트는 무리해서 길게 쓰지 말고 사실 위주로 짧게."
                     ),
                 },
                 {"role": "user", "content": prompt},
@@ -748,7 +827,9 @@ def curate_events_with_llm(
         if not isinstance(idx, int) or idx < 1 or idx > len(events) or idx in used_indexes:
             continue
         used_indexes.add(idx)
-        cards.append(_event_to_card(events[idx - 1], reason=rec.get("reason") or ""))
+        event = events[idx - 1]
+        reason = _polish_event_reason(rec.get("reason") or "", event, query)
+        cards.append(_event_to_card(event, reason=reason))
         if len(cards) >= top_k:
             break
     return cards  # 빈 배열 = LLM이 의도적으로 비움 (맞는 후보 없음)
@@ -951,6 +1032,70 @@ def _event_to_card(event: Any, reason: str) -> dict[str, Any]:
         "reason": reason,
         "curation": reason or _fallback_reason(event, ""),
     }
+
+
+EMPTY_REASON_PHRASES = (
+    "특별한 경험",
+    "깊은 감동",
+    "감성적인 요소",
+    "감성적인 경험",
+    "안성맞춤",
+    "추천드립니다",
+)
+
+
+def _polish_event_reason(reason: str, event: Any, query: str) -> str:
+    """Replace generic LLM wording with intro-based copy when needed."""
+    cleaned = " ".join(str(reason or "").split())
+    if cleaned and not any(phrase in cleaned for phrase in EMPTY_REASON_PHRASES):
+        return cleaned
+
+    hook = _event_intro_hook(event)
+    if not hook:
+        return cleaned or _fallback_reason(event, query)
+
+    category = str(_event_attr(event, "new_main_category") or "")
+    if category == "팝업스토어":
+        return f"{hook} 소개글에 보이는 콘텐츠가 뚜렷해서 가볍게 들러보기 좋아요."
+    if category == "전시":
+        return f"{hook} 이 흐름을 천천히 따라가며 보기 좋은 전시예요."
+    return f"{hook} 이 지점이 요청한 분위기와 잘 맞아요."
+
+
+def _event_intro_hook(event: Any) -> str:
+    """Extract one concrete sentence from crawled intro text."""
+    text = str(
+        _event_attr(event, "description")
+        or _event_attr(event, "vector_summary_v2")
+        or _event_attr(event, "vector_summary")
+        or ""
+    ).strip()
+    if not text:
+        return ""
+
+    if "콘텐츠 ✅" in text:
+        text = text.split("콘텐츠 ✅", 1)[1].strip()
+
+    # Prefer phrases that are often the actual curatorial hook.
+    for keyword in ("멈춤", "비움", "느슨", "아슬아슬", "작가", "컨셉", "주제", "체험", "최초 공개"):
+        if keyword in text:
+            start = max(0, text.find(keyword) - 35)
+            snippet = text[start:]
+            return _first_sentence(snippet)
+
+    return _first_sentence(text)
+
+
+def _first_sentence(text: str, max_len: int = 95) -> str:
+    compact = " ".join(text.replace("\n", " ").split())
+    compact = compact.lstrip(" .。!?,，、")
+    for sep in ("다. ", "요. ", ". ", "! ", "? "):
+        if sep in compact:
+            compact = compact.split(sep, 1)[0] + sep.strip()
+            break
+    if len(compact) > max_len:
+        compact = compact[:max_len].rstrip()
+    return compact.strip()
 
 
 def _fallback_reason(event: Any, query: str) -> str:

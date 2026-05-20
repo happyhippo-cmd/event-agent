@@ -26,10 +26,10 @@ export default function Nav() {
         )}
         {loggedIn && (
           <>
-            <button type="button" onClick={() => showAppPage('surfy')} className={appLinkClass('surfy')}>
+            <button type="button" data-nav-target="surfy" onClick={() => showAppPage('surfy')} className={appLinkClass('surfy')}>
               Surfy
             </button>
-            <button type="button" onClick={() => showAppPage('history')} className={appLinkClass('history')}>
+            <button type="button" data-nav-target="history" onClick={() => showAppPage('history')} className={appLinkClass('history')}>
               History
             </button>
             <button type="button" className="bg-transparent border-0 text-inherit cursor-default">

@@ -1,179 +1,26 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import {
-  ALBUMS,
-  createFoodSuggestionsForPlace,
-  getPlaceKey,
-  getPlaceSelectionKey,
-  getRecommendedPlaces,
-} from '@/data/albums';
 import { useKdive } from '@/store/KdiveContext';
+import { HistoryCard, EmptyCard, ComingSoonCard } from './HistoryCard';
+import MusicKeywordCallout from './MusicKeywordCallout';
+import RegionClusterPanel from './RegionClusterPanel';
+import SurferGuideCharacter from './SurferGuideCharacter';
+import { HistoryHelp, FilterIcon } from './HistoryHelp';
+import {
+  buildTrackItems,
+  buildPlaceItems,
+  buildFoodItems,
+  isHistoryItemLiked,
+} from './historyItems';
 
 const TABS = [
-  { id: 'liked', label: 'Liked' },
-  { id: 'cluster', label: '지역 클러스터' },
-  { id: 'places', label: '관광지' },
-  { id: 'foods', label: '맛집' },
-  { id: 'events', label: '전시/팝업' },
+  { id: 'all', label: 'All' },
+  { id: 'cluster', label: 'Region Cluster' },
+  { id: 'places', label: 'Attractions' },
+  { id: 'foods', label: 'Restaurants' },
+  { id: 'events', label: 'Exhibitions / Pop-up' },
 ];
-
-function buildPlaceHistoryItem(key, place, album) {
-  return {
-    key: `place-${key}`,
-    rawKey: key,
-    type: 'place',
-    label: place.category === 'must' ? '필수 명소' : '관광지',
-    album,
-    place,
-    title: place.name,
-    subtitle: place.source_keyword || album?.title || 'Tour Agent recommendation',
-    emoji: place.emoji || '🏛️',
-  };
-}
-
-function buildFoodHistoryItem(key, food, album) {
-  return {
-    key: `food-${key}`,
-    rawKey: key,
-    type: 'food',
-    label: '맛집',
-    album,
-    food,
-    title: food.title || food.name || key,
-    subtitle: food.placeName || food.area || food.genre || food.category || 'Restaurant Agent recommendation',
-    emoji: '🍜',
-  };
-}
-
-function buildHistoryItems(
-  likedTrackIds,
-  likedPlaceKeys,
-  likedPlaceRecords,
-  likedFoodKeys,
-  likedFoodRecords,
-  onboardingPlaces,
-  activeAlbum
-) {
-  const tracks = ALBUMS
-    .filter((album) => likedTrackIds.has(album.id))
-    .map((album) => ({
-      key: `track-${album.id}`,
-      type: 'track',
-      label: 'Keyword',
-      album,
-      title: album.vibe,
-      subtitle: 'K-Dive mood keyword',
-      emoji: '♡',
-    }));
-
-  const places = [];
-  const foods = [];
-  const seenPlaceKeys = new Set();
-  const seenFoodKeys = new Set();
-
-  const pushPlace = (key, place, album) => {
-    if (!likedPlaceKeys.has(key) || seenPlaceKeys.has(key)) return;
-    places.push(buildPlaceHistoryItem(key, likedPlaceRecords[key] || place, album));
-    seenPlaceKeys.add(key);
-  };
-
-  ALBUMS.forEach((album) => {
-    getRecommendedPlaces(album).forEach((place) => {
-      const key = getPlaceKey(album.id, place.name);
-      pushPlace(key, place, album);
-
-      createFoodSuggestionsForPlace(album, place).forEach((food) => {
-        if (likedFoodKeys.has(food.key) && !seenFoodKeys.has(food.key)) {
-          foods.push(buildFoodHistoryItem(food.key, likedFoodRecords[food.key] || food, album));
-          seenFoodKeys.add(food.key);
-        }
-      });
-    });
-  });
-
-  onboardingPlaces.forEach((place) => {
-    const key = getPlaceSelectionKey(activeAlbum?.id || 'onboarding', place);
-    pushPlace(key, place, activeAlbum);
-  });
-
-  Object.entries(likedPlaceRecords).forEach(([key, place]) => {
-    pushPlace(key, place, activeAlbum);
-  });
-
-  likedPlaceKeys.forEach((key) => {
-    if (seenPlaceKeys.has(key)) return;
-    const [, name] = key.split('::');
-    pushPlace(key, { name: name || key, category: 'keyword', label: '관광지' }, activeAlbum);
-  });
-
-  Object.entries(likedFoodRecords).forEach(([key, food]) => {
-    if (!likedFoodKeys.has(key) || seenFoodKeys.has(key)) return;
-    foods.push(buildFoodHistoryItem(key, food, activeAlbum));
-    seenFoodKeys.add(key);
-  });
-
-  likedFoodKeys.forEach((key) => {
-    if (seenFoodKeys.has(key)) return;
-    const [, name] = key.split('::');
-    foods.push(buildFoodHistoryItem(key, { key, title: name || key, category: '맛집' }, activeAlbum));
-    seenFoodKeys.add(key);
-  });
-
-  return { tracks, places, foods };
-}
-
-function EmptyCard({ index }) {
-  return (
-    <div
-      aria-hidden="true"
-      className="min-h-[260px] rounded-[16px] border border-[rgba(0,0,0,0.1)] bg-white shadow-[3px_5px_6px_rgba(0,0,0,0.16)] max-[900px]:min-h-[220px]"
-    >
-      <span className="sr-only">empty history slot {index + 1}</span>
-    </div>
-  );
-}
-
-function HistoryCard({ item, onUnlike }) {
-  return (
-    <article className="group relative min-h-[260px] overflow-hidden rounded-[16px] border border-[rgba(0,0,0,0.1)] bg-white shadow-[3px_5px_6px_rgba(0,0,0,0.16)] transition-transform duration-200 hover:-translate-y-1 max-[900px]:min-h-[220px]">
-      <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-white">
-        <span className="text-[40px]">{item.emoji}</span>
-        <span className="px-4 text-center text-[13px] text-muted">{item.label}</span>
-      </div>
-
-      <div className="absolute bottom-4 left-4 right-4 text-text">
-        <div className="mb-2 text-[10px] font-bold uppercase tracking-[0.12em] text-accent">
-          {item.label}
-        </div>
-        <h3 className="truncate font-serif text-[24px] leading-tight">{item.title}</h3>
-        <p className="mt-1 truncate text-[12px] text-muted">{item.subtitle}</p>
-      </div>
-
-      <button
-        type="button"
-        onClick={() => onUnlike(item)}
-        aria-label={`${item.title} 좋아요 취소`}
-        className="absolute bottom-5 right-5 flex h-9 w-9 items-center justify-center rounded-full border border-white bg-white text-[24px] leading-none text-heart shadow-[0_4px_14px_rgba(0,0,0,0.12)] transition-transform hover:scale-105"
-      >
-        ♥
-      </button>
-    </article>
-  );
-}
-
-function ComingSoonCard({ label }) {
-  return (
-    <div className="min-h-[260px] rounded-[16px] border border-[rgba(0,0,0,0.1)] bg-white p-6 shadow-[3px_5px_6px_rgba(0,0,0,0.16)] max-[900px]:min-h-[220px]">
-      <div className="flex h-full flex-col justify-between">
-        <span className="text-[11px] font-bold uppercase tracking-[0.12em] text-accent">{label}</span>
-        <p className="text-[13px] leading-[1.6] text-muted">
-          온보딩에서 저장한 기록을 바탕으로 채워질 영역이에요.
-        </p>
-      </div>
-    </div>
-  );
-}
 
 export default function HistoryPage() {
   const {
@@ -185,77 +32,203 @@ export default function HistoryPage() {
     likedPlaceRecords,
     likedFoodKeys,
     likedFoodRecords,
+    visitedHistoryKeys,
+    pendingUnlikeKeys,
     onboardingPlaces,
-    toggleTrackLike,
-    togglePlaceLike,
-    toggleFoodLike,
+    toggleHistoryVisit,
+    togglePendingUnlike,
+    showAppPage,
   } = useKdive();
-  const [activeTab, setActiveTab] = useState('liked');
+  const [activeTab, setActiveTab] = useState('all');
+  const [expandedCurationKey, setExpandedCurationKey] = useState(null);
+  const [sortOrder, setSortOrder] = useState('latest');
+  const [mobileTabsOpen, setMobileTabsOpen] = useState(false);
 
-  const items = useMemo(
-    () => buildHistoryItems(
-      likedTrackIds,
-      likedPlaceKeys,
-      likedPlaceRecords,
-      likedFoodKeys,
-      likedFoodRecords,
-      onboardingPlaces,
-      activeAlbum
-    ),
-    [likedTrackIds, likedPlaceKeys, likedPlaceRecords, likedFoodKeys, likedFoodRecords, onboardingPlaces, activeAlbum]
+  const tracks = useMemo(
+    () => buildTrackItems(likedTrackIds),
+    [likedTrackIds]
+  );
+  const places = useMemo(
+    () => buildPlaceItems(likedPlaceKeys, likedPlaceRecords, onboardingPlaces, activeAlbum),
+    [likedPlaceKeys, likedPlaceRecords, onboardingPlaces, activeAlbum]
+  );
+  const foods = useMemo(
+    () => buildFoodItems(likedFoodKeys, likedFoodRecords, activeAlbum),
+    [likedFoodKeys, likedFoodRecords, activeAlbum]
   );
 
   if (!loggedIn || activeAppPage !== 'history') return null;
 
+  const allSavedItems = [...places, ...foods];
   const visibleItems = (() => {
-    if (activeTab === 'places') return items.places;
-    if (activeTab === 'foods') return items.foods;
-    if (activeTab === 'liked') return [...items.tracks, ...items.places, ...items.foods];
+    if (activeTab === 'all') return allSavedItems;
+    if (activeTab === 'places') return places;
+    if (activeTab === 'foods') return foods;
     return [];
   })();
 
-  const placeholderCount = Math.max(0, 10 - visibleItems.length);
-  const isFutureTab = activeTab === 'cluster' || activeTab === 'events';
+  const isClusterTab = activeTab === 'cluster';
+  const isFutureTab = activeTab === 'events';
+  const activeTabIndex = Math.max(0, TABS.findIndex((tab) => tab.id === activeTab));
+  const activeTabLabel = TABS.find((tab) => tab.id === activeTab)?.label || 'All';
+  const sortedItems = sortOrder === 'latest' ? visibleItems : [...visibleItems].reverse();
+  const clusterItems = sortOrder === 'latest' ? allSavedItems : [...allSavedItems].reverse();
+  const historyEntries = isFutureTab
+    ? [
+        { kind: 'coming', key: `coming-${activeTab}`, label: TABS.find((tab) => tab.id === activeTab)?.label },
+        ...Array.from({ length: 9 }, (_, index) => ({ kind: 'empty', key: `future-empty-${index}`, index })),
+      ]
+    : sortedItems.map((item) => ({ kind: 'history', key: item.key, item }));
 
   const handleUnlike = (item) => {
-    if (item.type === 'track') toggleTrackLike(item.album.id);
-    if (item.type === 'place') togglePlaceLike(item.album?.id || 'history', item.place.name, item.rawKey, item.place);
-    if (item.type === 'food') toggleFoodLike(item.rawKey);
+    togglePendingUnlike(item);
+  };
+
+  const handleToggleVisited = (item) => {
+    if (item.type === 'track') return;
+    toggleHistoryVisit(item.key, {
+      type: item.type,
+      title: item.title,
+      subtitle: item.subtitle,
+      label: item.label,
+      rawKey: item.rawKey,
+      emoji: item.emoji,
+      albumId: item.album?.id,
+      place: item.place,
+      food: item.food,
+    });
+  };
+
+  const handleToggleCuration = (item) => {
+    setExpandedCurationKey((current) => (current === item.key ? null : item.key));
+  };
+
+  const handleSelectTab = (tabId) => {
+    setActiveTab(tabId);
+    setMobileTabsOpen(false);
+  };
+
+  const handleAskSurfy = () => {
+    showAppPage('surfy');
   };
 
   return (
-    <section id="historyPage" className="min-h-screen bg-white pt-[112px] max-[760px]:pt-[92px]">
-      <div className="mx-auto flex w-[min(1360px,calc(100%-64px))] flex-col gap-[72px] max-[760px]:w-[calc(100%-32px)] max-[760px]:gap-10">
-        <div className="flex flex-wrap justify-center gap-5 max-[760px]:gap-3">
-          {TABS.map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => setActiveTab(tab.id)}
-              className={`min-w-[112px] border-0 px-8 py-4 text-[20px] font-bold transition-colors max-[760px]:min-w-0 max-[760px]:px-4 max-[760px]:py-3 max-[760px]:text-[14px] ${
-                activeTab === tab.id ? 'bg-accent text-white' : 'bg-[#d9d9d9] text-text hover:bg-accent-border'
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
+    <section id="historyPage" className="h-[100dvh] overflow-hidden bg-white max-[760px]:h-auto max-[760px]:min-h-screen max-[760px]:overflow-visible">
+      <div className="mx-auto flex h-full w-[min(960px,calc(100%-96px))] flex-col gap-[clamp(12px,1.6vh,20px)] pb-[3vh] pt-[max(84px,8vh)] max-[760px]:h-auto max-[760px]:w-[calc(100%-32px)] max-[760px]:gap-5 max-[760px]:pb-8 max-[760px]:pt-[78px]">
+        <header className="flex items-center justify-between gap-5 max-[760px]:flex-col max-[760px]:items-start">
+          <div className="min-w-0">
+            <h1 className="text-[20px] font-bold uppercase tracking-[0.12em] text-accent">History</h1>
+          </div>
+        </header>
+
+        <div className="flex items-center gap-2 rounded-[999px] bg-white p-1 max-[760px]:rounded-[22px] max-[760px]:items-start">
+          <div className="min-w-0 flex-1">
+            <div className="relative grid w-full grid-cols-5 overflow-hidden rounded-[999px] max-[760px]:hidden">
+              <span
+                aria-hidden="true"
+                className="absolute bottom-0 left-0 top-0 rounded-full bg-[linear-gradient(135deg,#00a8e8,#006fe8)] transition-transform duration-200 ease-out"
+                style={{
+                  width: '20%',
+                  transform: `translateX(${activeTabIndex * 100}%)`,
+                }}
+              />
+              {TABS.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => handleSelectTab(tab.id)}
+                  className={`relative z-[1] h-10 rounded-full border-0 px-3 text-[14px] font-bold transition-colors ${
+                    activeTab === tab.id ? 'text-white' : 'bg-transparent text-accent-dark hover:text-accent'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+            <div className="hidden max-[760px]:block">
+              <button
+                type="button"
+                onClick={() => setMobileTabsOpen((open) => !open)}
+                aria-expanded={mobileTabsOpen}
+                aria-controls="historyMobileTabs"
+                className="flex h-10 w-full items-center justify-between rounded-full border-0 bg-white/55 px-4 text-[14px] font-bold text-accent-dark outline-none transition-colors hover:text-accent"
+              >
+                <span>{activeTabLabel}</span>
+                <span className={`text-[12px] transition-transform ${mobileTabsOpen ? 'rotate-180' : ''}`}>⌄</span>
+              </button>
+              {mobileTabsOpen ? (
+                <div
+                  id="historyMobileTabs"
+                  className="mt-2 grid gap-1 rounded-[18px] border border-[rgba(0,0,0,0.08)] bg-white p-2 shadow-[4px_4px_4px_rgba(0,0,0,0.02)]"
+                >
+                  {TABS.map((tab) => (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => handleSelectTab(tab.id)}
+                      className={`flex h-9 items-center justify-between rounded-full border-0 px-3 text-left text-[14px] font-bold transition-colors ${
+                        activeTab === tab.id
+                          ? 'bg-accent text-white'
+                          : 'bg-transparent text-accent-dark hover:bg-accent-soft'
+                      }`}
+                    >
+                      <span>{tab.label}</span>
+                      {activeTab === tab.id ? <span aria-hidden="true">✓</span> : null}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSortOrder((current) => (current === 'latest' ? 'oldest' : 'latest'))}
+            className="flex h-10 flex-shrink-0 items-center gap-1.5 rounded-full border-0 bg-transparent px-3 text-[14px] font-bold text-accent-dark transition-colors hover:bg-white/45 hover:text-accent max-[760px]:px-2"
+          >
+            <FilterIcon />
+            {sortOrder === 'latest' ? 'Latest' : 'Oldest'}
+          </button>
+          <HistoryHelp />
         </div>
 
-        <div className="kd-history-scroll max-h-[calc(100vh-260px)] overflow-y-auto pr-7 max-[760px]:max-h-none max-[760px]:overflow-visible max-[760px]:pr-0">
-          <div className="grid grid-cols-5 gap-x-8 gap-y-10 max-[1180px]:grid-cols-4 max-[900px]:grid-cols-3 max-[640px]:grid-cols-2 max-[420px]:grid-cols-1">
-            {isFutureTab && <ComingSoonCard label={TABS.find((tab) => tab.id === activeTab)?.label} />}
-            {!isFutureTab && visibleItems.map((item) => (
-              <HistoryCard key={item.key} item={item} onUnlike={handleUnlike} />
-            ))}
-            {!isFutureTab && Array.from({ length: placeholderCount }).map((_, index) => (
-              <EmptyCard key={`empty-${index}`} index={index} />
-            ))}
-            {isFutureTab && Array.from({ length: 9 }).map((_, index) => (
-              <EmptyCard key={`future-empty-${index}`} index={index} />
-            ))}
-          </div>
+        <MusicKeywordCallout tracks={tracks} />
+
+        <div className="kd-history-scroll min-h-0 flex-1 overflow-y-auto pr-3 pt-2 scroll-pt-2 max-[760px]:h-auto max-[760px]:overflow-visible max-[760px]:pr-0">
+          {isClusterTab ? (
+            <RegionClusterPanel
+              items={clusterItems}
+              visitedKeys={visitedHistoryKeys}
+              expandedCurationKey={expandedCurationKey}
+              onToggleCuration={handleToggleCuration}
+            />
+          ) : (
+            <div className="grid grid-cols-1 gap-4 min-[421px]:grid-cols-2 min-[641px]:grid-cols-3 min-[901px]:grid-cols-4 min-[1181px]:grid-cols-5">
+              {historyEntries.map((entry) => {
+                if (entry.kind === 'coming') {
+                  return <ComingSoonCard key={entry.key} label={entry.label} />;
+                }
+                if (entry.kind === 'empty') {
+                  return <EmptyCard key={entry.key} index={entry.index} />;
+                }
+                const { item } = entry;
+                return (
+                  <HistoryCard
+                    key={item.key}
+                    item={item}
+                    liked={isHistoryItemLiked(item, { likedTrackIds, likedPlaceKeys, likedFoodKeys, pendingUnlikeKeys })}
+                    visited={visitedHistoryKeys.has(item.key)}
+                    curationOpen={expandedCurationKey === item.key}
+                    onUnlike={handleUnlike}
+                    onToggleVisited={handleToggleVisited}
+                    onToggleCuration={handleToggleCuration}
+                  />
+                );
+              })}
+            </div>
+          )}
         </div>
       </div>
+      <SurferGuideCharacter onClick={handleAskSurfy} />
     </section>
   );
 }

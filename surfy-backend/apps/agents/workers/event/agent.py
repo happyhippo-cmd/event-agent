@@ -428,14 +428,28 @@ def curate_events_with_llm(
         taste_context,
         ("event_type_keywords", "mood_keywords", "current_mood_keywords", "preferred_music"),
     )
+    explicit_locations = [str(loc) for loc in (taste_context.get("location_keywords") or []) if loc]
+    suppressed = [str(s) for s in (taste_context.get("suppressed_keywords") or []) if s]
+
     prompt = (
         f"[사용자 질문] {query}\n\n"
         f"[최근 대화 흐름]\n{recent_history or '(첫 대화)'}\n\n"
         f"[사용자 취향 컨텍스트]\n"
         f"{', '.join(taste_terms) if taste_terms else '(취향 정보 없음)'}\n\n"
+        f"[사용자 발화에서 추출된 명시적 제약]\n"
+        f"- 지역명: {', '.join(explicit_locations) if explicit_locations else '(없음)'}\n"
+        f"- 피해야 할 조건: {', '.join(suppressed) if suppressed else '(없음)'}\n\n"
         f"[후보 이벤트]\n{json.dumps(event_summaries, ensure_ascii=False, indent=2)}\n\n"
         f"위 후보 중 사용자 요청에 **실제로** 맞는 이벤트를 최대 {top_k}개 고르세요.\n\n"
-        "**선정 우선순위 (★ 중요):**\n"
+        "**[0순위 — 사용자 발화 명시 제약 (아래 모든 우선순위보다 우선):**\n"
+        "먼저 위 [사용자 질문]을 한 번 더 그대로 읽고, 사용자가 직접 말한 모든 제약을 존중하세요.\n"
+        "- 지역명이 명시된 경우: 후보의 location/description에 해당 지역이 포함된 것만 선정. "
+        "성수라고 했는데 강남 이벤트 고르면 안 됨.\n"
+        "- '~말고', '~빼고', '~지양', '~피하고' 같은 부정/회피 표현이 있으면 그 조건에 해당하는 후보는 제외. "
+        "예: '브랜드 홍보용 말고' → description·태그가 단순 브랜드 마케팅 중심인 팝업 제외, "
+        "작가·컨셉·체험 중심 팝업만 선정. '대형 페스티벌 말고' → 소규모/인디 페스티벌만 선정.\n"
+        "- 후보 중 명시적 제약을 만족하는 게 하나도 없으면 빈 배열 반환. 제약 어기면서 채우지 마세요.\n\n"
+        "**선정 우선순위 (★ 위 0순위 제약을 만족하는 후보 안에서):**\n"
         "- thumbnail_url이 있는 이벤트를 반드시 우선 선정 (없으면 UI에 이미지가 안 나와 사용자 경험이 나빠짐)\n"
         "- mood_tags에 '힙한', '트렌디한', '감각적인', '유니크한', 'SNS감성', '이색적인' 등이 많을수록 우선\n"
         "- 활동적이고 체험형인 이벤트 우선 (직접 참여/체험 가능한 것)\n"

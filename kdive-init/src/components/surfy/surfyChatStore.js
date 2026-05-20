@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { getSurfyApiUrl } from '@/utils/surfyApi';
 
 // 원본 SURFY 프로토타입 대화. 메시지는 객체 배열로 보관.
 const SURFY_PROTOTYPE_MESSAGES = [
@@ -27,9 +28,7 @@ const SURFY_CAFE_CURATIONS = {
   'Cheongsudang Gongmyeong': 'Cheongsudang Gongmyeong은 디저트와 공간 분위기를 함께 보고 싶을 때 좋아요. 사진을 남기기 좋은 요소가 있고, 짧은 휴식 코스로 넣기에도 자연스러워요.',
 };
 
-const SURFY_CHAT_API_URL = typeof window !== 'undefined' && window.KDIVE_CHAT_API_URL
-  ? window.KDIVE_CHAT_API_URL
-  : 'http://localhost:8000/api/chat/';
+const SURFY_CHAT_API_URL = getSurfyApiUrl('/api/chat/');
 
 const AGENT_STATUS_MESSAGES = [
   'Supervisor가 사용자의 입력에서 취향과 의도를 분석하고 있어요.',

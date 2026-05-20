@@ -235,9 +235,10 @@ def run_event_agent_for_state(state: KDiveState, top_k: int = DEFAULT_EVENT_TOP_
     if AGENT_EVENT not in target_agents:
         return state
 
+    agent_contexts = state.get("agent_taste_contexts") or {}
     result = run_event_agent(
         query=state["user_utterance"],
-        taste_context=state.get("taste_context", {}),
+        taste_context=agent_contexts.get(AGENT_EVENT) or state.get("taste_context", {}),
         top_k=top_k,
     )
     state["event_result"] = result

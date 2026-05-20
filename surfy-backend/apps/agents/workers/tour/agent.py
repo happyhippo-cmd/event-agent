@@ -5,6 +5,9 @@ Tour Worker Agent — entry node
       DB 없으면 → Kakao API 검색 → [LLM] 선별 → JSON
 """
 
+from __future__ import annotations
+
+import math
 import os
 import sqlite3
 import json
@@ -13,6 +16,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from apps.agents.utils import haversine_km, topic_label
+from apps.agents.state import KDiveState, AGENT_TOURIST
 
 BASE_DIR = Path(__file__).resolve().parents[4]
 load_dotenv(BASE_DIR / ".env")
@@ -697,3 +701,17 @@ def run(user_message: str, radius_km: float = 3.0) -> dict:
         "llm_selection_reason": reason,
         "recommended_places": ranked,
     }
+
+
+def run_tour_agent_for_state(state: KDiveState, radius_km: float = 3.0) -> KDiveState:
+    """Supervisor가 tourist로 라우팅했을 때 KDiveState를 받아 tour agent를 실행한다."""
+    if AGENT_TOURIST not in (state.get("target_agents") or []):
+        return state
+
+    agent_contexts = state.get("agent_taste_contexts") or {}
+    taste = agent_contexts.get(AGENT_TOURIST) or state.get("taste_context") or {}
+    location_keywords = taste.get("location_keywords") or []
+    user_message = location_keywords[0] if location_keywords else state["user_utterance"]
+
+    state["tourist_result"] = run(user_message=user_message, radius_km=radius_km)
+    return state

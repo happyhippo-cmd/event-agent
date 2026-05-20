@@ -212,12 +212,15 @@ def run_event_agent(
             "recommended_events": [],
         }
 
-    base_msg = _build_event_response_message(query, curate_taste_context, curated[:top_k])
-    final_msg = f"{relax_note} {base_msg}".strip() if relax_note else base_msg
+    # relax_note 있을 땐 _build_event_response_message가 내부에서 자연스럽게 엮어준다.
+    final_msg = _build_event_response_message(
+        query, curate_taste_context, curated[:top_k], relax_note=relax_note,
+    )
     return {
         "status": "ok",
         "message": final_msg,
         # 호출 측(dummy_server 등)이 최종 응답에 prepend할 수 있도록 별도 필드로도 노출.
+        # 단, message에 이미 relax_note가 포함되어 있으니 dummy_server는 중복 prepend 안 함.
         "relaxation_note": relax_note,
         "recommended_events": curated[:top_k],
     }
@@ -245,8 +248,14 @@ def _build_event_response_message(
     query: str,
     taste_context: dict[str, Any],
     curated: list[dict[str, Any]],
+    relax_note: str = "",
 ) -> str:
-    """Build a short user-facing summary that mirrors the user's request."""
+    """Build a short user-facing summary that mirrors the user's request.
+
+    relax_note가 있으면 표준 인트로("좋아요. ~ 쪽으로 골라봤어요.")는 생략하고
+    짧은 마무리 한 문장만 반환한다. relax_note 자체가 이미 "왜 이걸 보여주는지"
+    설명하므로, 표준 인트로까지 붙이면 인트로가 두 번이라 어색해진다.
+    """
     query_text = query or ""
     locations = [str(loc) for loc in (taste_context.get("location_keywords") or []) if loc]
     suppressed = [str(item) for item in (taste_context.get("suppressed_keywords") or []) if item]
@@ -291,6 +300,10 @@ def _build_event_response_message(
         modifiers.append("차분한")
 
     request_label = " ".join([*modifiers, object_term]).strip() or "요청한 분위기"
+
+    # 완화 안내가 이미 인트로 역할을 하므로 짧은 마무리만 붙인다.
+    if relax_note:
+        return f"{relax_note} 이런 {object_term}들이 있더라구요."
 
     detail = "후보 중 요청과 가장 가까운 곳만 추렸어요."
     if "아이돌" in query_text or "케이팝" in query_text.lower() or "k-pop" in query_text.lower():

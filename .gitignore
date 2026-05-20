@@ -56,3 +56,7 @@ surfy-backend/data/
 **/melon_concerts*.json
 **/yanolja_concerts*.csv
 **/yanolja_concerts*.json
+
+# ===== Exclude melon and yanolja folders =====
+melon/
+yanolja/

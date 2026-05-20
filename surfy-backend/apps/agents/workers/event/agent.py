@@ -124,6 +124,22 @@ GENRE_KEYWORDS = {
 }
 
 
+def _retrieve_and_hard_filter(
+    query: str,
+    mood: str,
+    location_keywords: list[str],
+    genre_filter: list[str],
+) -> list[dict[str, Any]]:
+    """Keyword+vector 검색 후 location/genre 하드 필터를 적용한 후보 풀을 반환."""
+    events = search_events_from_db(query=query, mood=mood, limit=20)
+    events = _merge_with_vector_search(events, query=query, mood=mood, limit=20)
+    if location_keywords:
+        events = _filter_by_explicit_location(events, location_keywords)
+    if genre_filter:
+        events = _filter_by_genre(events, genre_filter)
+    return events
+
+
 def run_event_agent(
     query: str,
     taste_context: dict[str, Any] | None = None,
@@ -133,8 +149,13 @@ def run_event_agent(
     """Return event recommendations for Surfy's worker-agent pipeline."""
 
     mood = _event_mood_from_taste(taste_context or {})
+    location_keywords = [
+        str(loc) for loc in (taste_context or {}).get("location_keywords") or [] if loc
+    ]
+    genre_filter = _detect_genre_filter(query, mood)
+
     try:
-        events = search_events_from_db(query=query, mood=mood, limit=20)
+        events = _retrieve_and_hard_filter(query, mood, location_keywords, genre_filter)
     except Exception as exc:
         return {
             "status": "error",
@@ -142,22 +163,30 @@ def run_event_agent(
             "recommended_events": [],
         }
 
-    events = _merge_with_vector_search(events, query=query, mood=mood, limit=20)
-
-    # 명시적 지역 제약은 하드 필터로 보장 (LLM 프롬프트만으로는 비결정적).
-    # 벡터 검색에 location 필터가 없어 merge에 타지역 후보가 섞이는데,
-    # LLM이 후보 풀에서 위반 후보를 못 보게 사전 제거한다.
-    location_keywords = [
-        str(loc) for loc in (taste_context or {}).get("location_keywords") or [] if loc
-    ]
-    if location_keywords:
-        events = _filter_by_explicit_location(events, location_keywords)
-
-    # 음악 장르 하드 필터: "아이돌"이라 했는데 인디 가수가 추천되는 회귀를 막는다.
-    # music_genre가 명시적으로 다른 장르면 LLM이 보기 전에 제거.
-    genre_filter = _detect_genre_filter(query, mood)
-    if genre_filter:
-        events = _filter_by_genre(events, genre_filter)
+    # Function calling: 하드 필터로 후보가 0건이면 LLM이 어떤 제약을 완화할지 결정.
+    # tool_calls API로 진짜 도구 호출 한 번 수행 — 무한 루프 방지 위해 retry는 1회.
+    relax_note = ""
+    # 완화가 일어났을 때 curate 단계로 넘길 taste_context도 같이 풀어야 한다.
+    # 그렇지 않으면 curate 프롬프트의 0순위 룰("지역명이 명시된 경우 해당 지역만 선정")이
+    # 다른 지역 후보를 모두 거부해서 결과가 다시 비게 된다.
+    curate_taste_context = taste_context or {}
+    if not events and (location_keywords or genre_filter):
+        relaxation = _ask_llm_for_relaxation(
+            query=query, location_keywords=location_keywords, genre_filter=genre_filter,
+        )
+        if relaxation:
+            relaxed_loc = [] if relaxation.get("relax_location") else location_keywords
+            relaxed_genre = [] if relaxation.get("relax_genre") else genre_filter
+            if relaxed_loc != location_keywords or relaxed_genre != genre_filter:
+                try:
+                    events = _retrieve_and_hard_filter(query, mood, relaxed_loc, relaxed_genre)
+                except Exception:
+                    events = []
+                if events:
+                    relax_note = relaxation.get("note") or ""
+                    curate_taste_context = dict(taste_context or {})
+                    if relaxation.get("relax_location"):
+                        curate_taste_context["location_keywords"] = []
 
     if not events:
         return {
@@ -169,7 +198,7 @@ def run_event_agent(
     curated = curate_events_with_llm(
         events=events,
         query=query,
-        taste_context=taste_context or {},
+        taste_context=curate_taste_context,
         history=history or [],
         top_k=top_k,
     )
@@ -186,9 +215,13 @@ def run_event_agent(
         }
 
     names = ", ".join(item["title"] for item in curated[:top_k] if item.get("title"))
+    base_msg = f"좋아요. 지금 요청에 맞는 이벤트 {len(curated[:top_k])}곳을 골랐어요: {names}"
+    final_msg = f"{relax_note} {base_msg}".strip() if relax_note else base_msg
     return {
         "status": "ok",
-        "message": f"좋아요. 지금 요청에 맞는 이벤트 {len(curated[:top_k])}곳을 골랐어요: {names}",
+        "message": final_msg,
+        # 호출 측(dummy_server 등)이 최종 응답에 prepend할 수 있도록 별도 필드로도 노출.
+        "relaxation_note": relax_note,
         "recommended_events": curated[:top_k],
     }
 
@@ -333,21 +366,20 @@ def _detect_genre_filter(query: str, mood: str) -> list[str]:
 def _filter_by_genre(
     rows: list[dict[str, Any]], genre_filter: list[str]
 ) -> list[dict[str, Any]]:
-    """music_genre가 요청 장르와 명시적으로 다른 후보를 제거한다.
+    """music_genre가 요청 장르와 명시적으로 일치하는 후보만 남긴다 (strict).
 
-    music_genre는 JSON 배열 문자열(예: '["K-pop 아이돌"]')로 저장. 빈 배열·
-    "모름"·"기타"는 분류 정보가 부족한 경우라 그대로 통과시키고, 명시적
-    장르가 있을 때만 매칭 여부로 판단한다.
+    music_genre는 JSON 배열 문자열(예: '["K-pop 아이돌"]')로 저장. "기타"·"모름"·
+    빈 배열은 분류 정보가 없어 요청 장르 매칭이 불가하므로 제외한다.
+    이렇게 해야 결과가 0건일 때 function calling 완화 경로가 정확히 트리거된다.
 
     예: 사용자 "아이돌 콘서트" → genre_filter=["K-pop 아이돌"]
-        - 닐로(["인디"]) → 명시적 다른 장르 → 제거
-        - I.O.I(["K-pop 아이돌"]) → 매칭 → 유지
-        - 분류 안 된 콘서트(["기타"]) → 정보 부족 → 유지
+        - 닐로(["인디"]) → 제거
+        - I.O.I(["K-pop 아이돌"]) → 유지
+        - 분류 없는 콘서트(["기타"]) → 제거 (트로트인지 발라드인지 알 수 없음)
     """
     if not genre_filter:
         return rows
     filtered: list[dict[str, Any]] = []
-    ambiguous_tags = {"기타", "모름"}
     for row in rows:
         raw = row.get("music_genre") or ""
         try:
@@ -355,9 +387,6 @@ def _filter_by_genre(
         except (json.JSONDecodeError, TypeError):
             tags = [raw] if raw else []
         tags = [str(t) for t in tags if t]
-        if not tags or all(t in ambiguous_tags for t in tags):
-            filtered.append(row)
-            continue
         if any(g in tags for g in genre_filter):
             filtered.append(row)
     return filtered
@@ -496,6 +525,90 @@ def search_events(
     if not non_area_keywords and not detected_areas:
         return list(_order_events(active_qs, field_names)[:limit])
     return []
+
+
+_RELAX_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "search_events_relaxed",
+        "description": (
+            "사용자 요청 조건이 너무 좁아 후보가 0건일 때, 어떤 제약을 완화해서 "
+            "다시 검색할지 결정한다. 지역과 장르 중 더 우선해야 할 것을 유지하고 "
+            "덜 본질적인 쪽을 풀어라. 예: 사용자가 특정 장르(아이돌·재즈 등)와 "
+            "지역(성수·홍대 등)을 둘 다 말했다면, 장르가 보통 더 핵심이라 location을 "
+            "푸는 게 합리적이다. 단순 '근처' 같은 약한 지역 표현은 더 적극적으로 푼다."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "relax_location": {
+                    "type": "boolean",
+                    "description": "true면 location_keywords를 무시하고 전체 지역에서 재검색.",
+                },
+                "relax_genre": {
+                    "type": "boolean",
+                    "description": "true면 music_genre 하드 필터를 끄고 재검색.",
+                },
+                "note": {
+                    "type": "string",
+                    "description": (
+                        "사용자에게 보여줄 한 문장 한국어 안내. 어떤 조건을 풀었는지·왜 그랬는지 "
+                        "친근한 존댓말로. 예: '성수에 트로트 공연은 없어서 서울 다른 지역도 함께 봤어요.'"
+                    ),
+                },
+            },
+            "required": ["relax_location", "relax_genre", "note"],
+        },
+    },
+}
+
+
+def _ask_llm_for_relaxation(
+    query: str,
+    location_keywords: list[str],
+    genre_filter: list[str],
+) -> dict[str, Any] | None:
+    """0건 결과일 때 LLM이 어떤 하드 필터를 풀지 tool_call로 결정한다.
+
+    OpenAI function calling으로 _RELAX_TOOL_SCHEMA를 호출시키고 그 인자를 반환.
+    툴 호출이 안 일어나거나 파싱 실패면 None — 호출부에서 그대로 no_results 처리.
+    """
+    client = get_openai_client()
+    if client is None:
+        return None
+    system_msg = (
+        "너는 사용자 요청 조건이 너무 좁아 결과가 0건일 때 어떤 제약을 완화할지 "
+        "판단하는 도우미다. 반드시 search_events_relaxed 도구를 한 번만 호출하라. "
+        "지역과 장르를 둘 다 풀면 사용자의 본래 의도가 흐려지니, 최소한만 푼다."
+    )
+    user_msg = (
+        f"사용자 발화: {query}\n"
+        f"적용됐던 location_keywords: {location_keywords or '(없음)'}\n"
+        f"적용됐던 music_genre 필터: {genre_filter or '(없음)'}\n"
+        f"이 조합으로 후보가 0건이다. 어떤 제약을 완화할지 도구로 답하라."
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=os.getenv("EVENT_AGENT_MODEL", "gpt-4o-mini"),
+            temperature=0,
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            tools=[_RELAX_TOOL_SCHEMA],
+            tool_choice={"type": "function", "function": {"name": "search_events_relaxed"}},
+        )
+        tool_calls = resp.choices[0].message.tool_calls or []
+        if not tool_calls:
+            return None
+        args = json.loads(tool_calls[0].function.arguments)
+    except Exception:
+        return None
+    return {
+        "relax_location": bool(args.get("relax_location")),
+        "relax_genre": bool(args.get("relax_genre")),
+        "note": str(args.get("note") or "").strip(),
+    }
 
 
 def curate_events_with_llm(

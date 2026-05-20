@@ -242,12 +242,17 @@ def run_chat_pipeline(payload):
 
     if recommendations:
         recommendations = recommendations[:3]
+        base_response = _build_recommendation_response(
+            recommendations,
+            target_agents,
+            result_state.get("taste_context", {}),
+        )
+        # event agent가 제약을 완화한 경우(예: 성수에 트로트 없어서 다른 지역도 봤음)
+        # 사용자에게 그 사실을 먼저 알린다.
+        event_relax = (agent_results.get("event") or {}).get("relaxation_note") or ""
+        final_response = f"{event_relax} {base_response}".strip() if event_relax else base_response
         return {
-            "response": _build_recommendation_response(
-                recommendations,
-                target_agents,
-                result_state.get("taste_context", {}),
-            ),
+            "response": final_response,
             "route_decision": {
                 "target_agents": target_agents,
                 "taste_context": result_state.get("taste_context", {}),

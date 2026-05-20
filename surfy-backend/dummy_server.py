@@ -262,8 +262,6 @@ def run_chat_pipeline(payload):
         recommendations.extend(_format_tour_recommendations(tour_result))
 
     if recommendations:
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
         recommendations = recommendations[:3]
         base_response = _build_recommendation_response(
             recommendations,
@@ -284,10 +282,6 @@ def run_chat_pipeline(payload):
         if base_response.startswith(event_relax):
             event_relax = ""
         final_response = f"{event_relax} {base_response}".strip() if event_relax else base_response
-=======
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
         return {
             "response": final_response,
             "route_decision": {
@@ -816,16 +810,8 @@ def _tour_category_label(category):
 def _build_recommendation_response(recommendations, target_agents, taste_context=None):
     names = ", ".join(item["name"] for item in recommendations if item.get("name"))
     count = len(recommendations)
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-=======
     if "event" in target_agents and "tourist" in target_agents and "foodie" not in target_agents:
         return f"좋아요. 관광지와 전시·이벤트를 함께 골랐어요: {names}"
->>>>>>> Stashed changes
-=======
-    if "event" in target_agents and "tourist" in target_agents and "foodie" not in target_agents:
-        return f"좋아요. 관광지와 전시·이벤트를 함께 골랐어요: {names}"
->>>>>>> Stashed changes
     if "event" in target_agents and "foodie" not in target_agents and "tourist" not in target_agents:
         return f"좋아요. 지금 요청에 맞는 이벤트 {count}곳을 골랐어요: {names}"
     if "foodie" in target_agents and "tourist" in target_agents:

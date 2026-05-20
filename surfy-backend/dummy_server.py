@@ -34,6 +34,9 @@ BASE_DIR = os.path.dirname(__file__)
 sys.path.insert(0, BASE_DIR)
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
+# 세션별 pending clarification state 저장 (인메모리, 재시작 시 초기화)
+_pending_clarifications: dict = {}
+
 STATUS_MESSAGES = [
     "Supervisor가 사용자의 입력에서 취향과 의도를 분석하고 있어요.",
     "필요한 전문 Agent를 불러올게요.",
@@ -43,6 +46,7 @@ STATUS_MESSAGES = [
 LOCATION_HINTS = (
     "강남", "서초", "홍대", "연남", "합정", "망원", "성수", "압구정", "신사",
     "이태원", "한남", "을지로", "종로", "명동", "성북", "잠실", "여의도",
+    "북촌", "서촌", "인사동", "혜화", "대학로", "경복궁", "광화문", "남산",
 )
 FOOD_CATEGORY_HINTS = {
     "카페": ("카페", "커피", "브런치", "디저트", "찻집", "베이커리"),
@@ -169,14 +173,12 @@ def run_onboarding_foods(payload):
 
 def run_chat_pipeline(payload):
     from apps.agents.state import AGENT_EVENT, AGENT_FOODIE, AGENT_TOURIST
-    from apps.agents.supervisor import supervisor_intake
+    from apps.agents.supervisor import supervisor_intake, continue_after_clarification
 
+    history = payload.get("history") or []
     user_message = str(payload.get("message") or "").strip()
-    effective_message = _contextualize_followup(
-        user_message=user_message,
-        history=payload.get("history") or [],
-    )
     user_context = payload.get("user_context") or {}
+
     if not user_message:
         return {
             "response": "메시지를 입력해 주세요.",
@@ -186,14 +188,27 @@ def run_chat_pipeline(payload):
             "status_messages": [],
         }
 
-    state = {
-        "user_utterance": effective_message,
-        "onboarding_data": _build_onboarding_data(user_context),
-    }
-    result_state = supervisor_intake(state)
+    # 이전 턴에 저장된 pending clarification state 확인
+    session_key = _make_session_key(history)
+    pending_state = _pending_clarifications.pop(session_key, None)
+
+    if pending_state is not None:
+        # pending state가 있으면 continue_after_clarification()으로 이어서 처리
+        effective_message = user_message  # 세션 복원 시: 사용자 답변을 그대로 사용
+        result_state = continue_after_clarification(pending_state, user_message)
+    else:
+        effective_message = user_message
+        state = {
+            "user_utterance": effective_message,
+            "onboarding_data": _build_onboarding_data(user_context),
+            "messages": history,
+            "accumulated_keywords": _build_accumulated_keywords_from_history(history),
+        }
+        result_state = supervisor_intake(state)
+
     result_state = _apply_deterministic_taste_hints(
         result_state=result_state,
-        user_message=effective_message,
+        user_message=user_message,
         event_agent=AGENT_EVENT,
         foodie_agent=AGENT_FOODIE,
         tourist_agent=AGENT_TOURIST,
@@ -202,6 +217,11 @@ def run_chat_pipeline(payload):
 
     if result_state.get("needs_user_clarification"):
         question = result_state.get("clarification_question") or "조금 더 구체적으로 알려주실래요?"
+        # 다음 턴을 위해 현재 state를 세션에 저장
+        next_session_key = _make_session_key(
+            history + [{"role": "user", "content": user_message}]
+        )
+        _pending_clarifications[next_session_key] = dict(result_state)
         return {
             "response": question,
             "route_decision": {
@@ -225,9 +245,10 @@ def run_chat_pipeline(payload):
         recommendations.extend(_format_foodie_recommendations(foodie_result))
 
     if AGENT_EVENT in target_agents:
+        event_taste = _agent_taste_context(result_state, AGENT_EVENT)
         event_result = _run_event_agent(
             effective_message,
-            taste_context=result_state.get("taste_context", {}),
+            taste_context=event_taste,
             history=payload.get("history") or [],
         )
         result_state["event_result"] = event_result
@@ -357,6 +378,7 @@ def _apply_deterministic_taste_hints(result_state, user_message, event_agent, fo
 
     if (
         state.get("needs_user_clarification")
+        and state.get("clarification_type") != "out_of_scope"
         and (is_food_request or is_event_request or is_tour_request)
         and target_agents
     ):
@@ -381,10 +403,13 @@ def _apply_user_context_to_taste(result_state, user_context):
     )
     if nickname:
         taste_context["nickname"] = nickname
-    liked_place_anchors = _extract_place_anchors(user_context.get("liked_places") or [])
-    if liked_place_anchors and not taste_context.get("nearby_place_keywords"):
-        taste_context["nearby_place_anchors"] = liked_place_anchors
-        taste_context["nearby_place_keywords"] = [anchor["name"] for anchor in liked_place_anchors]
+    # supervisor가 허용한 경우에만 온보딩 liked_places 좌표를 자동 anchor로 사용한다.
+    # 발화에 명시 location이 있으면 supervisor가 False로 내려보내므로 anchor 자동 설정을 건너뛴다.
+    if taste_context.get("allow_onboarding_anchors", True):
+        liked_place_anchors = _extract_place_anchors(user_context.get("liked_places") or [])
+        if liked_place_anchors and not taste_context.get("nearby_place_keywords"):
+            taste_context["nearby_place_anchors"] = liked_place_anchors
+            taste_context["nearby_place_keywords"] = [anchor["name"] for anchor in liked_place_anchors]
     if taste_context:
         state["taste_context"] = taste_context
     return state
@@ -462,26 +487,48 @@ def _append_unique(items, value):
         items.append(value)
 
 
-def _contextualize_followup(user_message, history):
-    if not _looks_like_followup(user_message):
-        return user_message
-
-    previous_user_messages = [
-        item.get("content", "")
-        for item in history
-        if item.get("role") == "user" and item.get("content")
-    ]
-    if not previous_user_messages:
-        return user_message
-
-    return f"{previous_user_messages[-1]}\n추가 조건: {user_message}"
-
-
-def _looks_like_followup(user_message):
-    return any(
-        marker in user_message
-        for marker in ("말고", "다른", "그거", "저거", "거기", "체인", "프랜차이즈", "스타벅스", "커피빈")
+def _make_session_key(history: list) -> str:
+    """대화 히스토리의 user 메시지만 기반으로 세션 키를 생성한다.
+    assistant 메시지는 저장/조회 시 포함 여부가 달라지므로 제외한다."""
+    user_messages = tuple(
+        m.get("content", "")
+        for m in history
+        if m.get("role") == "user"
     )
+    return str(hash(user_messages))
+
+
+def _build_accumulated_keywords_from_history(history):
+    """프론트가 보낸 raw history를 추천용 키워드 요약으로 압축한다.
+
+    이전 발화를 현재 발화에 그대로 붙이면 오래된 날짜나 장소가 현재 의도로
+    되살아나므로, 다음 턴 해석에 필요한 범주만 남긴다.
+    """
+    accumulated = {
+        "location": [],
+        "mood": [],
+        "place_type": [],
+        "food_type": [],
+        "suppressed": [],
+    }
+    for item in history:
+        if item.get("role") != "user":
+            continue
+        text = str(item.get("content") or "")
+        locations = _detect_locations(text)
+        if locations:
+            accumulated["location"] = locations
+        food_categories = _detect_food_categories(text)
+        if food_categories:
+            accumulated["food_type"] = food_categories
+            accumulated["place_type"] = food_categories
+        moods = _detect_moods(text)
+        accumulated["mood"] = list(dict.fromkeys(accumulated["mood"] + moods))
+        suppressed = _detect_suppressed_keywords(text)
+        accumulated["suppressed"] = list(
+            dict.fromkeys(accumulated["suppressed"] + suppressed)
+        )
+    return {key: value for key, value in accumulated.items() if value}
 
 
 def _extract_names(items):
@@ -523,12 +570,13 @@ def _run_foodie_agent(result_state, top_k):
     from apps.agents.workers.restaurant import run_restaurant_agent_for_state
     from apps.agents.workers.restaurant.agent import run_nearby_restaurant_agent
 
-    anchors = _resolve_nearby_anchors(result_state.get("taste_context", {}))
+    taste_context = _agent_taste_context(result_state, "foodie")
+    anchors = _resolve_nearby_anchors(taste_context)
     if anchors:
         result_state = dict(result_state)
         result = run_nearby_restaurant_agent(
             anchors=anchors,
-            taste_context=result_state.get("taste_context", {}),
+            taste_context=taste_context,
             top_k=top_k,
             radius_km=2.0,
         )
@@ -536,6 +584,11 @@ def _run_foodie_agent(result_state, top_k):
         result_state["restaurant_result"] = result
         return result_state
     return run_restaurant_agent_for_state(result_state, top_k=top_k)
+
+
+def _agent_taste_context(result_state, agent):
+    contexts = result_state.get("agent_taste_contexts") or {}
+    return contexts.get(agent) or result_state.get("taste_context", {})
 
 
 def _resolve_nearby_anchors(taste_context):
@@ -757,6 +810,8 @@ def _tour_category_label(category):
 def _build_recommendation_response(recommendations, target_agents, taste_context=None):
     names = ", ".join(item["name"] for item in recommendations if item.get("name"))
     count = len(recommendations)
+    if "event" in target_agents and "tourist" in target_agents and "foodie" not in target_agents:
+        return f"좋아요. 관광지와 전시·이벤트를 함께 골랐어요: {names}"
     if "event" in target_agents and "foodie" not in target_agents and "tourist" not in target_agents:
         return f"좋아요. 지금 요청에 맞는 이벤트 {count}곳을 골랐어요: {names}"
     if "foodie" in target_agents and "tourist" in target_agents:

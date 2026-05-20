@@ -7,7 +7,18 @@ JSON 배열로, 각 항목은 아래 필드를 포함합니다.
 - category (str): 아래 중 하나
     - "place_type"   : 장소 종류 (카페, 맛집, 박물관, 공원, 바 등)
     - "mood"         : 분위기/감성 (조용한, 아늑한, 힙한, 감성적인, 시끄럽지 않은 등)
-    - "location"     : 지역명 (홍대, 이태원, 강남, 북촌, 서울 등)
+    - "location"     : 모든 지리적 위치 표현. 아래를 모두 포함합니다.
+        · 행정구역: 강남구, 성수동, 서초구, 종로구
+        · 동네·번화가: 홍대, 이태원, 북촌, 연남동
+        · 지하철역: 강남역, 성수역, 혜화역 (역 이름 그대로 유지)
+        · 공원·하천: 한강공원, 여의도 한강공원, 올림픽공원, 남산
+        · 거리·길: 가로수길, 로데오거리, 경리단길
+        · 랜드마크·관광지: 남산서울타워, 경복궁, 롯데월드
+        · 광역 지명: 서울, 경기, 인천, 수도권
+      ※ 처음 보는 지명이라도 "어떤 장소의 고유한 이름/위치"로 읽히면 location으로 분류하세요.
+        예시 목록에 없는 지명이어도, 지명이면 반드시 location입니다.
+        지명이 명소·관광 맥락이면 location 으로 두되 별도 activity 키워드(구경/산책 등)로
+        tourist 의도를 함께 표현하세요. 지명 자체를 place_type/activity 로 분류하지 마세요.
     - "food_type"    : 음식 종류 (한식, 라멘, 디저트, 커피 등)
     - "event_type"   : 이벤트 종류 (팝업스토어, 전시, 공연, 페스티벌 등)
     - "activity"     : 행동/목적 (산책, 사색, 데이트, 혼자만의 시간 등)
@@ -49,12 +60,32 @@ JSON 배열로, 각 항목은 아래 필드를 포함합니다.
 
 ---
 
+## ★★★ 절대 금지 — 원문 단어 변형 금지
+아래 행동은 어떤 경우에도 절대 하지 마세요.
+- 복합 명사를 임의로 분리하거나 첫 글자/일부만 추출하는 것
+  ✗ 틀림: "화덕피자" → "화", "화덕" / "갈비탕" → "갈" / "낙산공원" → "낙산"
+  ✓ 맞음: "화덕피자" → "화덕피자" / "갈비탕" → "갈비탕" / "낙산공원" → "낙산공원"
+- 원문에 없는 단어를 만들어내는 것
+  ✗ 틀림: 원문 "화덕피자 식당" → 키워드 "화 식당" (원문에 없는 단어)
+  ✓ 맞음: 원문 "화덕피자 식당" → 키워드 "화덕피자", "식당"
+
+추출한 place_type · food_type · location · event_type 키워드는
+반드시 원문에 그대로 등장하는 완전한 단어/어절이어야 합니다.
+
+---
+
 ## 규칙
 0. is_past_action 판단:
    - 과거형 어미("~했는데", "~봤는데", "~다녀왔는데", "~먹었는데")가 붙은 행동 → true
    - 현재/미래 의도("~하고 싶어", "~추천해줘", "~알려줘", "~하고") → false
    - is_past_action=true인 키워드는 배경 맥락으로만 사용되며 라우팅 결정에 영향을 주지 않습니다.
-1. 키워드는 의미 단위로 분리하되 너무 잘게 쪼개지 마세요.
+1. food_type과 place_type은 항상 별도 키워드로 분리하세요.
+   "음식 종류 + 장소 종류" 형태가 붙어 있어도 반드시 두 개로 나눠야 합니다.
+   - "한식 식당" → "한식"(food_type), "식당"(place_type) (O) / "한식 식당"(place_type) (X)
+   - "라멘 맛집" → "라멘"(food_type), "맛집"(place_type) (O)
+   - "화덕피자 식당" → "화덕피자"(food_type), "식당"(place_type) (O)
+   - "디저트 카페" → "디저트"(food_type), "카페"(place_type) (O)
+1-1. 키워드는 의미 단위로 분리하되 너무 잘게 쪼개지 마세요.
    ★ 원문 단어를 절대 임의로 잘라내거나 변형하지 마세요. 원문 형태 그대로 추출하세요.
      - "화덕피자 식당" → "화덕피자", "식당" (O) / "화 식당" (X)
      - "조용하게 혼자" → "조용한", "혼자" (O) / "조 혼자" (X)
@@ -169,6 +200,38 @@ JSON 배열로, 각 항목은 아래 필드를 포함합니다.
   {"keyword": "전통 있는", "category": "mood", "agent_hint": "foodie"},
   {"keyword": "한식", "category": "food_type", "agent_hint": "foodie"},
   {"keyword": "맛집", "category": "place_type", "agent_hint": "foodie"}
+]
+
+입력: "홍대 근처 한식 식당 추천해줘"
+출력:
+[
+  {"keyword": "홍대 근처", "category": "location", "agent_hint": "any"},
+  {"keyword": "한식", "category": "food_type", "agent_hint": "foodie"},
+  {"keyword": "식당", "category": "place_type", "agent_hint": "foodie"}
+]
+
+입력: "가로수길에서 브런치 카페 추천해줄래?"
+출력:
+[
+  {"keyword": "가로수길", "category": "location", "agent_hint": "any"},
+  {"keyword": "브런치", "category": "food_type", "agent_hint": "foodie"},
+  {"keyword": "카페", "category": "place_type", "agent_hint": "foodie"}
+]
+
+입력: "성수역 근처에서 디저트 카페 알려줘"
+출력:
+[
+  {"keyword": "성수역 근처", "category": "location", "agent_hint": "any"},
+  {"keyword": "디저트", "category": "food_type", "agent_hint": "foodie"},
+  {"keyword": "카페", "category": "place_type", "agent_hint": "foodie"}
+]
+
+입력: "한강공원 근처에서 산책하고 카페도 갈만한 곳 알려줘"
+출력:
+[
+  {"keyword": "한강공원 근처", "category": "location", "agent_hint": "any"},
+  {"keyword": "산책", "category": "activity", "agent_hint": "tourist"},
+  {"keyword": "카페", "category": "place_type", "agent_hint": "foodie"}
 ]
 
 입력: "이번 주말에 갈 만한 전시나 팝업 있어?"

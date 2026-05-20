@@ -263,6 +263,7 @@ def run_chat_pipeline(payload):
 
     if recommendations:
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
         recommendations = recommendations[:3]
         base_response = _build_recommendation_response(
             recommendations,
@@ -283,6 +284,8 @@ def run_chat_pipeline(payload):
         if base_response.startswith(event_relax):
             event_relax = ""
         final_response = f"{event_relax} {base_response}".strip() if event_relax else base_response
+=======
+>>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
         return {
@@ -814,6 +817,11 @@ def _build_recommendation_response(recommendations, target_agents, taste_context
     names = ", ".join(item["name"] for item in recommendations if item.get("name"))
     count = len(recommendations)
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
+=======
+    if "event" in target_agents and "tourist" in target_agents and "foodie" not in target_agents:
+        return f"좋아요. 관광지와 전시·이벤트를 함께 골랐어요: {names}"
+>>>>>>> Stashed changes
 =======
     if "event" in target_agents and "tourist" in target_agents and "foodie" not in target_agents:
         return f"좋아요. 관광지와 전시·이벤트를 함께 골랐어요: {names}"

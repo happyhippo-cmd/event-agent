@@ -157,6 +157,7 @@ class KDiveState(TypedDict):
     _carried_keywords: NotRequired[list[dict]]    # 범위 밖 안내 후 다음 발화로 이어받을 키워드
     _surfy_user_context: NotRequired[dict]         # Surfy API payload user_context 임시 전달용
     _surfy_history: NotRequired[list[dict]]        # Surfy API payload history 임시 전달용
+    _surfy_agent_completion_order: NotRequired[list[str]]  # worker 동시 실행 시 먼저 끝난 agent 순서
 
     # ===== 멀티턴 누적 키워드 컨텍스트 =====
     # raw 발화 전체 대신 핵심 키워드만 카테고리별로 누적해서 보관한다.

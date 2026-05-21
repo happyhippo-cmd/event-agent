@@ -5,7 +5,8 @@ LangGraph StateGraph + MemorySaver 기반 멀티턴 대화 그래프
 사용법:
     from apps.agents.graph import build_graph
 
-    graph = build_graph()
+    # workers_node: supervisor가 선택한 worker를 실행하는 함수 (필수)
+    graph = build_graph(workers_node=run_workers)
 
     # 첫 번째 턴
     result = graph.invoke(
@@ -28,50 +29,8 @@ from collections.abc import Callable
 from langgraph.graph import StateGraph, END, START
 from langgraph.checkpoint.memory import MemorySaver
 
-from .state import KDiveState, AGENT_TOURIST, AGENT_FOODIE, AGENT_EVENT
+from .state import KDiveState
 from .supervisor import supervisor_intake
-
-# Worker 임포트 — 각 에이전트의 for_state 인터페이스 사용
-from .workers.restaurant import run_restaurant_agent_for_state
-from .workers.foodie import run_foodie_agent_for_state
-from .workers.event import run_event_agent_for_state
-from .workers.tour.agent import run_tour_agent_for_state
-
-
-# ============================================================
-# Worker 노드 래퍼 함수
-# ============================================================
-
-
-def run_tourist_node(state: KDiveState) -> KDiveState:
-    """Tour worker 노드."""
-    return run_tour_agent_for_state(state)
-
-
-def run_foodie_node(state: KDiveState) -> KDiveState:
-    """Foodie worker 노드."""
-    state["foodie_result"] = run_foodie_agent_for_state(state)
-    return state
-
-
-def run_restaurant_node(state: KDiveState) -> KDiveState:
-    """Restaurant worker 노드."""
-    state["restaurant_result"] = run_restaurant_agent_for_state(state)
-    return state
-
-
-def run_event_node(state: KDiveState) -> KDiveState:
-    """Event worker 노드."""
-    state["event_result"] = run_event_agent_for_state(state)
-    return state
-
-
-def run_workers_node(state: KDiveState) -> KDiveState:
-    """Supervisor가 선택한 모든 worker를 순차 실행한다."""
-    state = run_tour_agent_for_state(state)
-    state = run_restaurant_agent_for_state(state)
-    state = run_event_agent_for_state(state)
-    return state
 
 
 # ============================================================
@@ -103,13 +62,17 @@ def done_node(state: KDiveState) -> dict:
 
 
 def build_graph(
+    workers_node: Callable[[KDiveState], KDiveState],
     after_supervisor: Callable[[KDiveState], KDiveState] | None = None,
-    workers_node: Callable[[KDiveState], KDiveState] | None = None,
 ) -> StateGraph:
     """
     MemorySaver가 붙은 컴파일된 LangGraph를 반환한다.
 
     thread_id가 같으면 이전 대화 state(messages, travel_phase 등)를 이어받는다.
+
+    Args:
+        workers_node: supervisor가 선택한 worker를 실행하는 함수 (필수)
+        after_supervisor: supervisor 직후 state를 정규화하는 함수 (선택)
 
     Returns:
         CompiledGraph: .invoke() / .stream() 으로 사용 가능한 그래프
@@ -118,10 +81,7 @@ def build_graph(
 
     # 노드 등록
     builder.add_node("supervisor", supervisor_intake)
-    builder.add_node("tourist", run_tourist_node)
-    builder.add_node("foodie", run_foodie_node)
-    builder.add_node("event", run_event_node)
-    builder.add_node("workers", workers_node or run_workers_node)
+    builder.add_node("workers", workers_node)
     builder.add_node("done", done_node)
 
     # 시작점
@@ -143,11 +103,8 @@ def build_graph(
         },
     )
 
-    # 각 worker → done → END
+    # workers → done → END
     builder.add_edge("workers", "done")
-    builder.add_edge("tourist", "done")
-    builder.add_edge("foodie", "done")
-    builder.add_edge("event", "done")
     builder.add_edge("done", END)
 
     # MemorySaver: thread_id 별로 state를 메모리에 보관

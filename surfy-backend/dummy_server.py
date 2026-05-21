@@ -23,7 +23,6 @@ from apps.agents.utils import (
     object_phrase as _object_phrase,
     preference_modifier as _intro_modifier,
     taste_terms as _list_taste_terms,
-    to_connective as _intro_connective,
     topic_label,
 )
 
@@ -251,20 +250,20 @@ def run_chat_pipeline(payload):
     agent_results = {}
     recommendations = []
 
-    if AGENT_RESTAURANT in ordered_agents:
-        restaurant_result = result_state.get("restaurant_result") or {}
-        agent_results["restaurant"] = restaurant_result
-        recommendations.extend(_format_restaurant_recommendations(restaurant_result))
-
-    if AGENT_EVENT in ordered_agents:
-        event_result = result_state.get("event_result") or {}
-        agent_results["event"] = event_result
-        recommendations.extend(_format_event_recommendations(event_result))
-
-    if AGENT_TOURIST in ordered_agents:
-        tour_result = result_state.get("tourist_result") or {}
-        agent_results["tourist"] = tour_result
-        recommendations.extend(_format_tour_recommendations(tour_result))
+    # 먼저 끝난 agent의 추천을 먼저 노출하기 위해 ordered_agents 순서대로 모은다.
+    for agent in ordered_agents:
+        if agent == AGENT_RESTAURANT:
+            restaurant_result = result_state.get("restaurant_result") or {}
+            agent_results["restaurant"] = restaurant_result
+            recommendations.extend(_format_restaurant_recommendations(restaurant_result))
+        elif agent == AGENT_EVENT:
+            event_result = result_state.get("event_result") or {}
+            agent_results["event"] = event_result
+            recommendations.extend(_format_event_recommendations(event_result))
+        elif agent == AGENT_TOURIST:
+            tour_result = result_state.get("tourist_result") or {}
+            agent_results["tourist"] = tour_result
+            recommendations.extend(_format_tour_recommendations(tour_result))
 
     if recommendations:
         base_response = _build_recommendation_response(
@@ -1113,7 +1112,7 @@ def _history_preference_phrase(moods):
 
 
 
-# _object_phrase, _list_taste_terms, _intro_modifier, _join_intro_modifiers, _intro_connective
+# _object_phrase, _list_taste_terms, _intro_modifier, _join_intro_modifiers
 # → apps.agents.utils 에서 import 완료 (파일 상단)
 
 

@@ -191,11 +191,14 @@ export function useSurfyChat() {
         wide: true,
         loading: false,
       });
-      if (Array.isArray(data?.recommendations) && data.recommendations.length) {
+      const recommendationCards = Array.isArray(data?.recommendations) ? data.recommendations : [];
+      const recommendationGroups = Array.isArray(data?.recommendation_groups) ? data.recommendation_groups : [];
+      if (recommendationCards.length) {
         appendMessage({
           role: 'assistant',
           kind: 'agent_recommendations',
-          cards: data.recommendations.slice(0, 3),
+          cards: recommendationCards,
+          groups: recommendationGroups,
           wide: true,
         });
       }

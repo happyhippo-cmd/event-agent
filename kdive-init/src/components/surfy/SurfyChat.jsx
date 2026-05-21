@@ -17,9 +17,51 @@ const getFallbackEmoji = (card) => {
 };
 
 const getAgentPickLabel = (sourceAgent) => {
-  if (sourceAgent === 'tourist') return 'Tour pick';
-  if (sourceAgent === 'event') return 'Event pick';
-  return 'Restaurant pick';
+  if (sourceAgent === 'tourist') return 'Local Scout pick';
+  if (sourceAgent === 'event') return 'Culture Insider pick';
+  return 'Foodie pick';
+};
+
+const getAgentSectionTitle = (sourceAgent) => {
+  if (sourceAgent === 'tourist') return 'Local Scout';
+  if (sourceAgent === 'event') return 'Culture Insider';
+  return 'Foodie';
+};
+
+const getAgentSectionRole = (sourceAgent) => {
+  if (sourceAgent === 'tourist') return 'Sightseeing guide';
+  if (sourceAgent === 'event') return 'Event guide';
+  return 'Korean food guide';
+};
+
+const getRecommendationGroups = (message) => {
+  if (Array.isArray(message.groups) && message.groups.length) {
+    return message.groups
+      .map((group) => ({
+        source_agent: group.source_agent,
+        label: group.label || getAgentSectionTitle(group.source_agent),
+        role: group.role || getAgentSectionRole(group.source_agent),
+        cards: Array.isArray(group.cards) ? group.cards : [],
+      }))
+      .filter((group) => group.cards.length);
+  }
+
+  const groups = [];
+  const groupIndex = {};
+  for (const card of message.cards || []) {
+    const sourceAgent = card.source_agent || 'restaurant';
+    if (!groupIndex[sourceAgent]) {
+      groupIndex[sourceAgent] = {
+        source_agent: sourceAgent,
+        label: getAgentSectionTitle(sourceAgent),
+        role: getAgentSectionRole(sourceAgent),
+        cards: [],
+      };
+      groups.push(groupIndex[sourceAgent]);
+    }
+    groupIndex[sourceAgent].cards.push(card);
+  }
+  return groups;
 };
 
 export default function SurfyChat() {
@@ -162,64 +204,75 @@ export default function SurfyChat() {
             );
           }
           if (message.kind === 'agent_recommendations') {
+            const groups = getRecommendationGroups(message);
             return (
               <div
                 key={message.id || `agent-recommendations-${idx}`}
-                className="grid grid-cols-3 gap-[10px] w-[min(760px,100%)] ml-[46px] max-[980px]:grid-cols-1 max-[980px]:ml-0"
+                className="w-[min(920px,100%)] ml-[46px] flex flex-col gap-[18px] max-[980px]:ml-0"
                 aria-label="추천 장소"
               >
-                {message.cards.map((card) => {
-                  const cardKey = getRecommendationKey(card);
-                  const hasPhoto = card.photo_url && !imageErrorKeys.has(cardKey);
-                  const isExpanded = expandedCurationKey === cardKey;
-                  return (
-                    <article
-                      key={cardKey}
-                      className="min-h-[286px] border border-[rgba(0,0,0,0.08)] rounded-[8px] bg-white p-[14px] text-left flex flex-col gap-[10px] shadow-[0_10px_24px_rgba(0,0,0,0.04)]"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => toggleCuration(cardKey)}
-                        aria-expanded={isExpanded}
-                        aria-label={`${card.name} 큐레이션 보기`}
-                        className="relative w-full aspect-[16/10] overflow-hidden rounded-[8px] border border-[rgba(0,0,0,0.06)] bg-[#f6f6f6] cursor-pointer"
-                      >
-                        {hasPhoto ? (
-                          <img
-                            src={card.photo_url}
-                            alt=""
-                            onError={() => markImageError(cardKey)}
-                            className="absolute inset-0 w-full h-full object-cover"
-                          />
-                        ) : (
-                          <span className="absolute inset-0 flex items-center justify-center text-[34px] bg-accent-soft" aria-hidden="true">
-                            {getFallbackEmoji(card)}
-                          </span>
-                        )}
-                      </button>
-                      {isExpanded ? (
-                        <p className="text-[12px] text-black/65 leading-[1.6] rounded-[8px] bg-[#f8fbfc] border border-accent-border px-[11px] py-[10px]">
-                          {card.curation || card.ranking_basis || '큐레이션을 준비하고 있어요.'}
-                        </p>
-                      ) : null}
-                      <div className="min-w-0">
-                        <div className="text-[11px] text-accent font-bold leading-[1.3] mb-[5px]">
-                          {[getAgentPickLabel(card.source_agent), card.area || card.gu, card.category].filter(Boolean).join(' · ')}
-                        </div>
-                        <strong className="block text-[15px] leading-[1.35] text-text">{card.name}</strong>
-                      </div>
-                      <p className="text-[12px] text-black/55 leading-[1.5] min-h-[36px]">{card.address || '주소 정보 준비 중'}</p>
-                      <div className="flex flex-wrap gap-[6px] mt-auto">
-                        {card.rating ? <span className="h-[24px] px-[8px] rounded-full bg-[#f6f6f6] text-[11px] text-text flex items-center">평점 {card.rating}</span> : null}
-                        {card.review_count ? <span className="h-[24px] px-[8px] rounded-full bg-[#f6f6f6] text-[11px] text-text flex items-center">리뷰 {card.review_count}</span> : null}
-                        {card.distance_km ? <span className="h-[24px] px-[8px] rounded-full bg-[#f6f6f6] text-[11px] text-text flex items-center">거리 {card.distance_km}km</span> : null}
-                        {card.matched_preferences?.slice(0, 2).map((tag) => (
-                          <span key={tag} className="h-[24px] px-[8px] rounded-full bg-accent-soft text-[11px] text-accent-dark flex items-center">{tag}</span>
-                        ))}
-                      </div>
-                    </article>
-                  );
-                })}
+                {groups.map((group, groupIdx) => (
+                  <section key={`${group.source_agent || 'agent'}-${groupIdx}`} className="flex flex-col gap-[10px]">
+                    <div className="flex items-baseline gap-[8px] min-w-0">
+                      <strong className="text-[13px] leading-[1.35] text-text">{group.label}</strong>
+                      <span className="text-[11px] leading-[1.35] text-black/45">{group.role}</span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-[10px] max-[980px]:grid-cols-1">
+                      {group.cards.map((card) => {
+                        const cardKey = getRecommendationKey(card);
+                        const hasPhoto = card.photo_url && !imageErrorKeys.has(cardKey);
+                        const isExpanded = expandedCurationKey === cardKey;
+                        return (
+                          <article
+                            key={cardKey}
+                            className="min-h-[286px] border border-[rgba(0,0,0,0.08)] rounded-[8px] bg-white p-[14px] text-left flex flex-col gap-[10px] shadow-[0_10px_24px_rgba(0,0,0,0.04)]"
+                          >
+                            <button
+                              type="button"
+                              onClick={() => toggleCuration(cardKey)}
+                              aria-expanded={isExpanded}
+                              aria-label={`${card.name} 큐레이션 보기`}
+                              className="relative w-full aspect-[16/10] overflow-hidden rounded-[8px] border border-[rgba(0,0,0,0.06)] bg-[#f6f6f6] cursor-pointer"
+                            >
+                              {hasPhoto ? (
+                                <img
+                                  src={card.photo_url}
+                                  alt=""
+                                  onError={() => markImageError(cardKey)}
+                                  className="absolute inset-0 w-full h-full object-cover"
+                                />
+                              ) : (
+                                <span className="absolute inset-0 flex items-center justify-center text-[34px] bg-accent-soft" aria-hidden="true">
+                                  {getFallbackEmoji(card)}
+                                </span>
+                              )}
+                            </button>
+                            {isExpanded ? (
+                              <p className="text-[12px] text-black/65 leading-[1.6] rounded-[8px] bg-[#f8fbfc] border border-accent-border px-[11px] py-[10px]">
+                                {card.curation || card.ranking_basis || '큐레이션을 준비하고 있어요.'}
+                              </p>
+                            ) : null}
+                            <div className="min-w-0">
+                              <div className="text-[11px] text-accent font-bold leading-[1.3] mb-[5px]">
+                                {[getAgentPickLabel(card.source_agent), card.area || card.gu, card.category].filter(Boolean).join(' · ')}
+                              </div>
+                              <strong className="block text-[15px] leading-[1.35] text-text">{card.name}</strong>
+                            </div>
+                            <p className="text-[12px] text-black/55 leading-[1.5] min-h-[36px]">{card.address || '주소 정보 준비 중'}</p>
+                            <div className="flex flex-wrap gap-[6px] mt-auto">
+                              {card.rating ? <span className="h-[24px] px-[8px] rounded-full bg-[#f6f6f6] text-[11px] text-text flex items-center">평점 {card.rating}</span> : null}
+                              {card.review_count ? <span className="h-[24px] px-[8px] rounded-full bg-[#f6f6f6] text-[11px] text-text flex items-center">리뷰 {card.review_count}</span> : null}
+                              {card.distance_km ? <span className="h-[24px] px-[8px] rounded-full bg-[#f6f6f6] text-[11px] text-text flex items-center">거리 {card.distance_km}km</span> : null}
+                              {card.matched_preferences?.slice(0, 2).map((tag) => (
+                                <span key={tag} className="h-[24px] px-[8px] rounded-full bg-accent-soft text-[11px] text-accent-dark flex items-center">{tag}</span>
+                              ))}
+                            </div>
+                          </article>
+                        );
+                      })}
+                    </div>
+                  </section>
+                ))}
               </div>
             );
           }

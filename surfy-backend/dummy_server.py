@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from dotenv import load_dotenv
@@ -243,26 +244,29 @@ def run_chat_pipeline(payload):
         }
 
     target_agents = result_state.get("target_agents", [])
+    ordered_agents = _ordered_target_agents(
+        target_agents,
+        result_state.get("_surfy_agent_completion_order") or [],
+    )
     agent_results = {}
     recommendations = []
 
-    if AGENT_RESTAURANT in target_agents:
+    if AGENT_RESTAURANT in ordered_agents:
         restaurant_result = result_state.get("restaurant_result") or {}
         agent_results["restaurant"] = restaurant_result
         recommendations.extend(_format_restaurant_recommendations(restaurant_result))
 
-    if AGENT_EVENT in target_agents:
+    if AGENT_EVENT in ordered_agents:
         event_result = result_state.get("event_result") or {}
         agent_results["event"] = event_result
         recommendations.extend(_format_event_recommendations(event_result))
 
-    if AGENT_TOURIST in target_agents:
+    if AGENT_TOURIST in ordered_agents:
         tour_result = result_state.get("tourist_result") or {}
         agent_results["tourist"] = tour_result
         recommendations.extend(_format_tour_recommendations(tour_result))
 
     if recommendations:
-        recommendations = recommendations[:3]
         base_response = _build_recommendation_response(
             recommendations,
             target_agents,
@@ -290,6 +294,7 @@ def run_chat_pipeline(payload):
             },
             "agent_results": agent_results,
             "recommendations": recommendations,
+            "recommendation_groups": _group_recommendations_by_agent(recommendations),
             "status_messages": _status_messages_for_agents(target_agents),
         }
 
@@ -339,6 +344,34 @@ def _join_english_list(items):
     if len(items) == 2:
         return " and ".join(items)
     return f"{', '.join(items[:-1])}, and {items[-1]}"
+
+
+def _ordered_target_agents(target_agents, completion_order):
+    ordered = []
+    for agent in completion_order:
+        if agent in target_agents:
+            _append_unique(ordered, agent)
+    for agent in target_agents:
+        _append_unique(ordered, agent)
+    return ordered
+
+
+def _group_recommendations_by_agent(recommendations):
+    groups = []
+    group_index = {}
+    for card in recommendations:
+        agent = card.get("source_agent") or "agent"
+        if agent not in group_index:
+            display = AGENT_DISPLAY_LABELS.get(agent) or {"name": "Surfy", "role": "your local guide"}
+            group_index[agent] = {
+                "source_agent": agent,
+                "label": display["name"],
+                "role": display["role"],
+                "cards": [],
+            }
+            groups.append(group_index[agent])
+        group_index[agent]["cards"].append(card)
+    return groups
 
 
 def _get_surfy_chat_graph():
@@ -403,24 +436,94 @@ def _run_surfy_workers_node(state):
     result_state = dict(state)
     target_agents = result_state.get("target_agents", [])
     user_message = str(result_state.get("user_utterance") or "")
+    jobs = []
 
     if AGENT_RESTAURANT in target_agents:
-        result_state = _run_restaurant_worker(result_state, top_k=3)
+        jobs.append(
+            (
+                AGENT_RESTAURANT,
+                _run_restaurant_worker,
+                (dict(result_state), 3),
+                {},
+            )
+        )
 
     if AGENT_EVENT in target_agents:
         event_taste = _agent_taste_context(result_state, AGENT_EVENT)
-        event_result = _run_event_agent(
-            user_message,
-            taste_context=event_taste,
-            history=result_state.get("_surfy_history") or result_state.get("messages") or [],
+        jobs.append(
+            (
+                AGENT_EVENT,
+                _run_event_agent,
+                (user_message,),
+                {
+                    "taste_context": event_taste,
+                    "history": result_state.get("_surfy_history") or result_state.get("messages") or [],
+                },
+            )
         )
-        result_state["event_result"] = event_result
 
     if AGENT_TOURIST in target_agents:
-        tour_result = _run_tour_agent(user_message)
-        result_state["tourist_result"] = tour_result
+        jobs.append((AGENT_TOURIST, _run_tour_agent, (user_message,), {}))
+
+    if not jobs:
+        return result_state
+
+    # Agent들은 서로 독립적이므로 Surfy 통합 계층에서 병렬 실행한다.
+    completion_order = []
+    with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
+        futures = {
+            executor.submit(func, *args, **kwargs): agent
+            for agent, func, args, kwargs in jobs
+        }
+        for future in as_completed(futures):
+            agent = futures[future]
+            completion_order.append(agent)
+            try:
+                worker_output = future.result()
+            except Exception as exc:
+                worker_output = _worker_error_result(agent, exc)
+            _merge_worker_output(result_state, agent, worker_output)
+
+    result_state["_surfy_agent_completion_order"] = completion_order
 
     return result_state
+
+
+def _merge_worker_output(result_state, agent, worker_output):
+    if agent == "restaurant":
+        result = worker_output.get("restaurant_result") if isinstance(worker_output, dict) else None
+        if not result and isinstance(worker_output, dict):
+            result = worker_output.get("foodie_result") or worker_output
+        result_state["restaurant_result"] = result or {}
+        result_state["foodie_result"] = result or {}
+        return
+    if agent == "event":
+        result_state["event_result"] = worker_output or {}
+        return
+    if agent == "tourist":
+        result_state["tourist_result"] = worker_output or {}
+
+
+def _worker_error_result(agent, exc):
+    if agent == "restaurant":
+        return {
+            "status": "error",
+            "message": f"Restaurant Agent 실행 중 오류가 발생했어요: {exc}",
+            "candidates": [],
+        }
+    if agent == "event":
+        return {
+            "status": "error",
+            "message": f"Event Agent 실행 중 오류가 발생했어요: {exc}",
+            "recommended_events": [],
+        }
+    if agent == "tourist":
+        return {
+            "status": "error",
+            "message": f"Tour Agent 실행 중 오류가 발생했어요: {exc}",
+            "recommended_places": [],
+        }
+    return {"status": "error", "message": str(exc)}
 
 
 def _build_onboarding_data(user_context):
@@ -723,6 +826,8 @@ def _run_restaurant_worker(result_state, top_k):
         result_state["restaurant_result"] = result
         result_state["foodie_result"] = result
         return result_state
+    result_state = dict(result_state)
+    result_state["taste_context"] = taste_context
     return run_restaurant_agent_for_state(result_state, top_k=top_k)
 
 
@@ -951,6 +1056,10 @@ def _build_recommendation_response(recommendations, target_agents, taste_context
     names = ", ".join(item["name"] for item in recommendations if item.get("name"))
     count = len(recommendations)
     has_restaurant = "restaurant" in target_agents
+    if has_restaurant and "event" in target_agents and "tourist" in target_agents:
+        return f"좋아요. Foodie, Culture Insider, Local Scout가 함께 고른 추천 {count}곳이에요: {names}"
+    if has_restaurant and "event" in target_agents:
+        return f"좋아요. Foodie와 Culture Insider가 맛집과 이벤트를 함께 골랐어요: {names}"
     if "event" in target_agents and "tourist" in target_agents and not has_restaurant:
         return f"좋아요. 관광지와 전시·이벤트를 함께 골랐어요: {names}"
     if "event" in target_agents and not has_restaurant and "tourist" not in target_agents:

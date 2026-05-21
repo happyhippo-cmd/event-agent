@@ -23,6 +23,8 @@ LangGraph StateGraph + MemorySaver 기반 멀티턴 대화 그래프
     )
 """
 
+from collections.abc import Callable
+
 from langgraph.graph import StateGraph, END, START
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -100,7 +102,10 @@ def done_node(state: KDiveState) -> dict:
 # ============================================================
 
 
-def build_graph() -> StateGraph:
+def build_graph(
+    after_supervisor: Callable[[KDiveState], KDiveState] | None = None,
+    workers_node: Callable[[KDiveState], KDiveState] | None = None,
+) -> StateGraph:
     """
     MemorySaver가 붙은 컴파일된 LangGraph를 반환한다.
 
@@ -116,15 +121,21 @@ def build_graph() -> StateGraph:
     builder.add_node("tourist", run_tourist_node)
     builder.add_node("foodie", run_foodie_node)
     builder.add_node("event", run_event_node)
-    builder.add_node("workers", run_workers_node)
+    builder.add_node("workers", workers_node or run_workers_node)
     builder.add_node("done", done_node)
 
     # 시작점
     builder.add_edge(START, "supervisor")
 
-    # supervisor 이후 조건 분기
+    # supervisor 이후 필요하면 API별 정규화 노드를 거친 뒤 조건 분기
+    route_source = "supervisor"
+    if after_supervisor is not None:
+        route_source = "after_supervisor"
+        builder.add_node(route_source, after_supervisor)
+        builder.add_edge("supervisor", route_source)
+
     builder.add_conditional_edges(
-        "supervisor",
+        route_source,
         route_after_supervisor,
         {
             "workers": "workers",

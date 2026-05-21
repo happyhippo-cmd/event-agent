@@ -36,12 +36,21 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 # 세션별 pending clarification state 저장 (인메모리, 재시작 시 초기화)
 _pending_clarifications: dict = {}
+_surfy_chat_graph = None
 
 STATUS_MESSAGES = [
-    "Supervisor가 사용자의 입력에서 취향과 의도를 분석하고 있어요.",
-    "필요한 전문 Agent를 불러올게요.",
-    "Agent가 사용자 맞춤 장소를 선정하고 있어요.",
+    "Getting a feel for your travel style and request.",
+    "Matching you with the right local guide.",
+    "Curating travel-friendly picks for your Korea trip.",
 ]
+AGENT_DISPLAY_LABELS = {
+    # 내부 라우팅 id는 restaurant이지만, 사용자에게는 한국 맛집 전문가 Foodie로 보여준다.
+    "restaurant": {"name": "Foodie", "role": "your Korean food guide"},
+    # Tourist Agent는 사용자가 아니라 장소를 찾아주는 가이드처럼 보이도록 Local Scout로 표시한다.
+    "tourist": {"name": "Local Scout", "role": "your sightseeing guide"},
+    # Event Agent는 전시/팝업/공연을 잘 아는 현지 문화 큐레이터 느낌으로 표시한다.
+    "event": {"name": "Culture Insider", "role": "your event guide"},
+}
 
 LOCATION_HINTS = (
     "강남", "서초", "홍대", "연남", "합정", "망원", "성수", "압구정", "신사",
@@ -172,8 +181,8 @@ def run_onboarding_foods(payload):
 
 
 def run_chat_pipeline(payload):
-    from apps.agents.state import AGENT_EVENT, AGENT_FOODIE, AGENT_TOURIST
-    from apps.agents.supervisor import supervisor_intake, continue_after_clarification
+    from apps.agents.state import AGENT_EVENT, AGENT_RESTAURANT, AGENT_TOURIST
+    from apps.agents.supervisor import continue_after_clarification
 
     history = payload.get("history") or []
     user_message = str(payload.get("message") or "").strip()
@@ -194,26 +203,25 @@ def run_chat_pipeline(payload):
 
     if pending_state is not None:
         # pending state가 있으면 continue_after_clarification()으로 이어서 처리
-        effective_message = user_message  # 세션 복원 시: 사용자 답변을 그대로 사용
         result_state = continue_after_clarification(pending_state, user_message)
+        result_state["_surfy_user_context"] = user_context
+        result_state["_surfy_history"] = history
+        result_state = _normalize_surfy_state(result_state)
+        if not result_state.get("needs_user_clarification"):
+            result_state = _run_surfy_workers_node(result_state)
     else:
-        effective_message = user_message
         state = {
-            "user_utterance": effective_message,
+            "user_utterance": user_message,
             "onboarding_data": _build_onboarding_data(user_context),
             "messages": history,
             "accumulated_keywords": _build_accumulated_keywords_from_history(history),
+            "_surfy_user_context": user_context,
+            "_surfy_history": history,
         }
-        result_state = supervisor_intake(state)
-
-    result_state = _apply_deterministic_taste_hints(
-        result_state=result_state,
-        user_message=user_message,
-        event_agent=AGENT_EVENT,
-        foodie_agent=AGENT_FOODIE,
-        tourist_agent=AGENT_TOURIST,
-    )
-    result_state = _apply_user_context_to_taste(result_state, user_context)
+        result_state = _run_surfy_chat_graph(
+            state,
+            thread_id=_surfy_thread_id(payload, history, user_message),
+        )
 
     if result_state.get("needs_user_clarification"):
         question = result_state.get("clarification_question") or "조금 더 구체적으로 알려주실래요?"
@@ -231,33 +239,25 @@ def run_chat_pipeline(payload):
             },
             "agent_results": {},
             "recommendations": [],
-            "status_messages": STATUS_MESSAGES[:1],
+            "status_messages": _status_messages_for_agents(result_state.get("target_agents", []))[:1],
         }
 
     target_agents = result_state.get("target_agents", [])
     agent_results = {}
     recommendations = []
 
-    if AGENT_FOODIE in target_agents:
-        result_state = _run_foodie_agent(result_state, top_k=3)
-        foodie_result = result_state.get("foodie_result") or {}
-        agent_results["foodie"] = foodie_result
-        recommendations.extend(_format_foodie_recommendations(foodie_result))
+    if AGENT_RESTAURANT in target_agents:
+        restaurant_result = result_state.get("restaurant_result") or {}
+        agent_results["restaurant"] = restaurant_result
+        recommendations.extend(_format_restaurant_recommendations(restaurant_result))
 
     if AGENT_EVENT in target_agents:
-        event_taste = _agent_taste_context(result_state, AGENT_EVENT)
-        event_result = _run_event_agent(
-            effective_message,
-            taste_context=event_taste,
-            history=payload.get("history") or [],
-        )
-        result_state["event_result"] = event_result
+        event_result = result_state.get("event_result") or {}
         agent_results["event"] = event_result
         recommendations.extend(_format_event_recommendations(event_result))
 
     if AGENT_TOURIST in target_agents:
-        tour_result = _run_tour_agent(effective_message)
-        result_state["tourist_result"] = tour_result
+        tour_result = result_state.get("tourist_result") or {}
         agent_results["tourist"] = tour_result
         recommendations.extend(_format_tour_recommendations(tour_result))
 
@@ -271,7 +271,7 @@ def run_chat_pipeline(payload):
         event_result = agent_results.get("event") or {}
         if (
             AGENT_EVENT in target_agents
-            and AGENT_FOODIE not in target_agents
+            and AGENT_RESTAURANT not in target_agents
             and AGENT_TOURIST not in target_agents
             and event_result.get("message")
         ):
@@ -290,7 +290,7 @@ def run_chat_pipeline(payload):
             },
             "agent_results": agent_results,
             "recommendations": recommendations,
-            "status_messages": STATUS_MESSAGES,
+            "status_messages": _status_messages_for_agents(target_agents),
         }
 
     return {
@@ -301,8 +301,126 @@ def run_chat_pipeline(payload):
         },
         "agent_results": agent_results,
         "recommendations": [],
-        "status_messages": STATUS_MESSAGES[:1],
+        "status_messages": _status_messages_for_agents(target_agents)[:1],
     }
+
+
+def _status_messages_for_agents(target_agents):
+    selected = [
+        AGENT_DISPLAY_LABELS[agent]
+        for agent in target_agents
+        if agent in AGENT_DISPLAY_LABELS
+    ]
+    if not selected:
+        return STATUS_MESSAGES
+
+    matching_label = _agent_matching_label(selected)
+    active_label = _agent_active_label(selected)
+    verb = "are" if len(selected) > 1 else "is"
+    return [
+        STATUS_MESSAGES[0],
+        f"Matching you with {matching_label}.",
+        f"{active_label} {verb} curating travel-friendly picks.",
+    ]
+
+
+def _agent_matching_label(agents):
+    labels = [f"{agent['name']}, {agent['role']}" for agent in agents]
+    return _join_english_list(labels)
+
+
+def _agent_active_label(agents):
+    return _join_english_list([agent["name"] for agent in agents])
+
+
+def _join_english_list(items):
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return " and ".join(items)
+    return f"{', '.join(items[:-1])}, and {items[-1]}"
+
+
+def _get_surfy_chat_graph():
+    global _surfy_chat_graph
+    if _surfy_chat_graph is None:
+        from apps.agents.graph import build_graph
+
+        _surfy_chat_graph = build_graph(
+            after_supervisor=_normalize_surfy_state,
+            workers_node=_run_surfy_workers_node,
+        )
+    return _surfy_chat_graph
+
+
+def _run_surfy_chat_graph(state, thread_id):
+    return _get_surfy_chat_graph().invoke(
+        state,
+        config={"configurable": {"thread_id": thread_id}},
+    )
+
+
+def _surfy_thread_id(payload, history, user_message):
+    for key in ("thread_id", "session_id", "conversation_id", "chat_id"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+
+    first_user_message = next(
+        (
+            str(item.get("content") or "").strip()
+            for item in history
+            if item.get("role") == "user" and str(item.get("content") or "").strip()
+        ),
+        user_message,
+    )
+    return f"surfy:{hash(first_user_message)}"
+
+
+def _normalize_surfy_state(result_state):
+    from apps.agents.state import AGENT_EVENT, AGENT_FOODIE, AGENT_RESTAURANT, AGENT_TOURIST
+
+    user_message = str(result_state.get("user_utterance") or "")
+    user_context = result_state.get("_surfy_user_context") or {}
+    result_state = _apply_deterministic_taste_hints(
+        result_state=result_state,
+        user_message=user_message,
+        event_agent=AGENT_EVENT,
+        restaurant_agent=AGENT_RESTAURANT,
+        tourist_agent=AGENT_TOURIST,
+    )
+    result_state = _normalize_restaurant_target_agent(
+        result_state,
+        legacy_foodie_agent=AGENT_FOODIE,
+        restaurant_agent=AGENT_RESTAURANT,
+    )
+    return _apply_user_context_to_taste(result_state, user_context)
+
+
+def _run_surfy_workers_node(state):
+    from apps.agents.state import AGENT_EVENT, AGENT_RESTAURANT, AGENT_TOURIST
+
+    result_state = dict(state)
+    target_agents = result_state.get("target_agents", [])
+    user_message = str(result_state.get("user_utterance") or "")
+
+    if AGENT_RESTAURANT in target_agents:
+        result_state = _run_restaurant_worker(result_state, top_k=3)
+
+    if AGENT_EVENT in target_agents:
+        event_taste = _agent_taste_context(result_state, AGENT_EVENT)
+        event_result = _run_event_agent(
+            user_message,
+            taste_context=event_taste,
+            history=result_state.get("_surfy_history") or result_state.get("messages") or [],
+        )
+        result_state["event_result"] = event_result
+
+    if AGENT_TOURIST in target_agents:
+        tour_result = _run_tour_agent(user_message)
+        result_state["tourist_result"] = tour_result
+
+    return result_state
 
 
 def _build_onboarding_data(user_context):
@@ -330,7 +448,23 @@ def _build_onboarding_data(user_context):
     }
 
 
-def _apply_deterministic_taste_hints(result_state, user_message, event_agent, foodie_agent, tourist_agent):
+def _normalize_restaurant_target_agent(result_state, legacy_foodie_agent, restaurant_agent):
+    state = dict(result_state)
+    target_agents = []
+    for agent in state.get("target_agents") or []:
+        normalized = restaurant_agent if agent == legacy_foodie_agent else agent
+        _append_unique(target_agents, normalized)
+    if target_agents:
+        state["target_agents"] = target_agents
+
+    contexts = dict(state.get("agent_taste_contexts") or {})
+    if legacy_foodie_agent in contexts and restaurant_agent not in contexts:
+        contexts[restaurant_agent] = contexts[legacy_foodie_agent]
+        state["agent_taste_contexts"] = contexts
+    return state
+
+
+def _apply_deterministic_taste_hints(result_state, user_message, event_agent, restaurant_agent, tourist_agent):
     state = dict(result_state)
     taste_context = dict(state.get("taste_context") or {})
     target_agents = list(state.get("target_agents") or [])
@@ -351,7 +485,7 @@ def _apply_deterministic_taste_hints(result_state, user_message, event_agent, fo
         target_agents = [agent for agent in target_agents if agent != tourist_agent]
 
     if is_food_request:
-        _append_unique(target_agents, foodie_agent)
+        _append_unique(target_agents, restaurant_agent)
     if is_event_request:
         _append_unique(target_agents, event_agent)
     if is_tour_request:
@@ -566,11 +700,17 @@ def _name_from_key(key):
     return parts[0] if parts else ""
 
 
-def _run_foodie_agent(result_state, top_k):
+def _run_restaurant_worker(result_state, top_k):
+    from apps.agents.state import AGENT_FOODIE, AGENT_RESTAURANT
     from apps.agents.workers.restaurant import run_restaurant_agent_for_state
     from apps.agents.workers.restaurant.agent import run_nearby_restaurant_agent
 
-    taste_context = _agent_taste_context(result_state, "foodie")
+    agent_contexts = result_state.get("agent_taste_contexts") or {}
+    taste_context = (
+        agent_contexts.get(AGENT_RESTAURANT)
+        or agent_contexts.get(AGENT_FOODIE)
+        or result_state.get("taste_context", {})
+    )
     anchors = _resolve_nearby_anchors(taste_context)
     if anchors:
         result_state = dict(result_state)
@@ -580,8 +720,8 @@ def _run_foodie_agent(result_state, top_k):
             top_k=top_k,
             radius_km=2.0,
         )
-        result_state["foodie_result"] = result
         result_state["restaurant_result"] = result
+        result_state["foodie_result"] = result
         return result_state
     return run_restaurant_agent_for_state(result_state, top_k=top_k)
 
@@ -668,9 +808,9 @@ def _run_tour_agent(user_message):
     }
 
 
-def _format_foodie_recommendations(foodie_result):
-    status = foodie_result.get("status")
-    candidates = foodie_result.get("candidates") or []
+def _format_restaurant_recommendations(restaurant_result):
+    status = restaurant_result.get("status")
+    candidates = restaurant_result.get("candidates") or []
     if status != "ok" or not candidates:
         return []
 
@@ -810,11 +950,12 @@ def _tour_category_label(category):
 def _build_recommendation_response(recommendations, target_agents, taste_context=None):
     names = ", ".join(item["name"] for item in recommendations if item.get("name"))
     count = len(recommendations)
-    if "event" in target_agents and "tourist" in target_agents and "foodie" not in target_agents:
+    has_restaurant = "restaurant" in target_agents
+    if "event" in target_agents and "tourist" in target_agents and not has_restaurant:
         return f"좋아요. 관광지와 전시·이벤트를 함께 골랐어요: {names}"
-    if "event" in target_agents and "foodie" not in target_agents and "tourist" not in target_agents:
+    if "event" in target_agents and not has_restaurant and "tourist" not in target_agents:
         return f"좋아요. 지금 요청에 맞는 이벤트 {count}곳을 골랐어요: {names}"
-    if "foodie" in target_agents and "tourist" in target_agents:
+    if has_restaurant and "tourist" in target_agents:
         return f"좋아요. 맛집과 관광지를 함께 보고 어울리는 장소 {count}곳을 골랐어요: {names}"
     if "tourist" in target_agents:
         return f"좋아요. 지금 요청에 맞는 관광지 {count}곳을 골랐어요: {names}"
@@ -874,10 +1015,10 @@ def _build_no_result_response(target_agents, agent_results):
     if "tourist" in target_agents:
         tour_result = agent_results.get("tourist") or {}
         return tour_result.get("message") or "조건에 맞는 관광지 추천을 찾지 못했어요."
-    if "foodie" in target_agents:
-        foodie_result = agent_results.get("foodie") or {}
-        return foodie_result.get("message") or "조건에 맞는 Foodie 추천을 찾지 못했어요."
-    return "지금 prototype에서는 Foodie/Tour Agent 추천만 실행되고 있어요. 맛집이나 관광지 요청으로 다시 물어봐 주세요."
+    if "restaurant" in target_agents:
+        restaurant_result = agent_results.get("restaurant") or {}
+        return restaurant_result.get("message") or "조건에 맞는 맛집 추천을 찾지 못했어요."
+    return "지금 prototype에서는 Restaurant/Tour Agent 추천만 실행되고 있어요. 맛집이나 관광지 요청으로 다시 물어봐 주세요."
 
 
 if __name__ == "__main__":

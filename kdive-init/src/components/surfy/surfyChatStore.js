@@ -31,32 +31,63 @@ const SURFY_CAFE_CURATIONS = {
 const SURFY_CHAT_API_URL = getSurfyApiUrl('/api/chat/');
 
 const AGENT_STATUS_MESSAGES = [
-  'Supervisor가 사용자의 입력에서 취향과 의도를 분석하고 있어요.',
-  '필요한 전문 Agent를 불러올게요.',
+  'Getting a feel for your travel style and request.',
+  'Matching you with the right local guide.',
 ];
+const AGENT_DISPLAY_LABELS = {
+  // 내부 routing은 restaurant이지만, 사용자에게는 한국 맛집 전문가 Foodie로 보여준다.
+  restaurant: { name: 'Foodie', role: 'your Korean food guide' },
+  // Tourist Agent는 사용자가 아니라 장소를 찾아주는 가이드처럼 보이도록 Local Scout로 표시한다.
+  tourist: { name: 'Local Scout', role: 'your sightseeing guide' },
+  // Event Agent는 전시/팝업/공연을 잘 아는 현지 문화 큐레이터 느낌으로 표시한다.
+  event: { name: 'Culture Insider', role: 'your event guide' },
+};
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const FOODIE_HINTS = ['맛집', '식당', '밥', '카페', '커피', '브런치', '디저트', '한식', '일식', '중식', '양식'];
-const EXPLICIT_TOUR_HINTS = ['관광', '관광지', '여행지', '명소', '가볼만', '구경', '산책', '박물관', '공원'];
-const TOUR_HINTS = [...EXPLICIT_TOUR_HINTS, '볼거리'];
-const EVENT_HINTS = ['전시', '전시회', '팝업', '이벤트', '공연', '콘서트', '페스티벌', '행사'];
+// 서버 응답 전까지 보여줄 status preview 전용 키워드다.
+// 실제 agent 라우팅은 backend supervisor/LangGraph 결과를 따른다.
+const STATUS_PREVIEW_RESTAURANT_HINTS_KO = ['맛집', '식당', '밥', '카페', '커피', '브런치', '디저트', '한식', '일식', '중식', '양식'];
+const STATUS_PREVIEW_RESTAURANT_HINTS_EN = ['restaurant', 'food', 'meal', 'eat', 'cafe', 'coffee', 'brunch', 'dessert', 'korean food', 'japanese food', 'chinese food', 'western food'];
+const STATUS_PREVIEW_RESTAURANT_HINTS = [...STATUS_PREVIEW_RESTAURANT_HINTS_KO, ...STATUS_PREVIEW_RESTAURANT_HINTS_EN];
+
+const STATUS_PREVIEW_EXPLICIT_TOUR_HINTS_KO = ['관광', '관광지', '여행지', '명소', '가볼만', '구경', '산책', '박물관', '공원'];
+const STATUS_PREVIEW_EXPLICIT_TOUR_HINTS_EN = ['tour', 'sightseeing', 'landmark', 'attraction', 'place to visit', 'walk', 'museum', 'park'];
+const STATUS_PREVIEW_EXPLICIT_TOUR_HINTS = [...STATUS_PREVIEW_EXPLICIT_TOUR_HINTS_KO, ...STATUS_PREVIEW_EXPLICIT_TOUR_HINTS_EN];
+
+const STATUS_PREVIEW_TOUR_HINTS = [...STATUS_PREVIEW_EXPLICIT_TOUR_HINTS, '볼거리', 'things to do'];
+const STATUS_PREVIEW_EVENT_HINTS_KO = ['전시', '전시회', '팝업', '이벤트', '공연', '콘서트', '페스티벌', '행사'];
+const STATUS_PREVIEW_EVENT_HINTS_EN = ['exhibition', 'popup', 'pop-up', 'event', 'performance', 'concert', 'festival', 'show'];
+const STATUS_PREVIEW_EVENT_HINTS = [...STATUS_PREVIEW_EVENT_HINTS_KO, ...STATUS_PREVIEW_EVENT_HINTS_EN];
 
 const buildStatusMessages = (text) => {
-  const hasFoodie = FOODIE_HINTS.some((hint) => text.includes(hint));
-  const hasEvent = EVENT_HINTS.some((hint) => text.includes(hint));
-  const hasExplicitTour = EXPLICIT_TOUR_HINTS.some((hint) => text.includes(hint));
-  const hasTour = TOUR_HINTS.some((hint) => text.includes(hint)) && (!hasEvent || hasExplicitTour);
-  const labels = [
-    hasFoodie ? 'Foodie' : null,
-    hasTour ? 'Tour' : null,
-    hasEvent ? 'Event' : null,
+  const hasRestaurant = STATUS_PREVIEW_RESTAURANT_HINTS.some((hint) => text.includes(hint));
+  const hasEvent = STATUS_PREVIEW_EVENT_HINTS.some((hint) => text.includes(hint));
+  const hasExplicitTour = STATUS_PREVIEW_EXPLICIT_TOUR_HINTS.some((hint) => text.includes(hint));
+  const hasTour = STATUS_PREVIEW_TOUR_HINTS.some((hint) => text.includes(hint)) && (!hasEvent || hasExplicitTour);
+  const guides = [
+    hasRestaurant ? AGENT_DISPLAY_LABELS.restaurant : null,
+    hasTour ? AGENT_DISPLAY_LABELS.tourist : null,
+    hasEvent ? AGENT_DISPLAY_LABELS.event : null,
   ].filter(Boolean);
-  const agentLabel = labels.length ? `${labels.join('/')} Agent` : 'Agent';
+  const matchingLabel = guides.length ? formatGuideMatch(guides) : 'the right local guide';
+  const activeLabel = guides.length ? formatGuideNames(guides) : 'Your local guide';
+  const verb = guides.length > 1 ? 'are' : 'is';
   return [
-    ...AGENT_STATUS_MESSAGES,
-    `${agentLabel}가 사용자 맞춤 장소를 선정하고 있어요.`,
+    AGENT_STATUS_MESSAGES[0],
+    `Matching you with ${matchingLabel}.`,
+    `${activeLabel} ${verb} curating travel-friendly picks.`,
   ];
+};
+
+const formatGuideMatch = (guides) => joinEnglishList(guides.map((guide) => `${guide.name}, ${guide.role}`));
+
+const formatGuideNames = (guides) => joinEnglishList(guides.map((guide) => guide.name));
+
+const joinEnglishList = (items) => {
+  if (items.length <= 1) return items[0] || '';
+  if (items.length === 2) return items.join(' and ');
+  return `${items.slice(0, -1).join(', ')}, and ${items.at(-1)}`;
 };
 
 const INITIAL_CHATS = [
@@ -160,18 +191,26 @@ export function useSurfyChat() {
         wide: true,
         loading: false,
       });
-      if (Array.isArray(data?.recommendations) && data.recommendations.length) {
+      const recommendationCards = Array.isArray(data?.recommendations) ? data.recommendations : [];
+      const recommendationGroups = Array.isArray(data?.recommendation_groups) ? data.recommendation_groups : [];
+      if (recommendationCards.length) {
         appendMessage({
           role: 'assistant',
           kind: 'agent_recommendations',
-          cards: data.recommendations.slice(0, 3),
+          cards: recommendationCards,
+          groups: recommendationGroups,
           wide: true,
         });
       }
     } catch (e) {
+      const detail = e instanceof Error ? e.message : '';
+      const content = detail && detail !== 'request_failed'
+        ? `Agent 요청 중 오류가 발생했어요: ${detail}`
+        : 'Agent server is not ready yet. Please run the backend server from README.md, then try again.';
+
       updateMessage(statusId, {
         kind: 'text',
-        content: 'Agent server is not ready yet. Please run the backend server from README.md, then try again.',
+        content,
         wide: true,
         loading: false,
       });

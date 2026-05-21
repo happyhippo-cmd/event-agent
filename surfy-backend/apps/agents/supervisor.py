@@ -42,6 +42,13 @@ from .state import (
 # 상수
 # ============================================================
 
+# 키워드 앞에 붙는 비교·강조 부사 — 키워드 검증 시 앞부분에서 제거한다.
+# 예) "더 케이크 전문점" → "더"를 제거 후 "케이크 전문점"으로 재추출
+_LEADING_ADVERBS = frozenset({
+    "더", "좀", "많이", "너무", "아주", "매우", "되게", "엄청",
+    "그냥", "한번", "한 번", "이번엔", "이번에는", "제발",
+})
+
 # 발화 내 부정 표현 패턴 (억제 키워드 감지용)
 _NEGATIVE_PATTERNS = (
     "싫어", "싫은", "싫다", "싫음", "이 싫",
@@ -63,6 +70,14 @@ _TOURIST_INTENT_TERMS = (
     "산책", "박물관", "미술관", "공원", "야경", "볼거리",
 )
 
+# 발화에 등장하면 맛집(foodie) 의도가 명확한 장소·음식 어휘
+# LLM이 "카페" 등을 mood/location으로 오분류하거나 누락해 라우팅 투표 total=0이 되는 경우를 방지한다.
+_FOODIE_INTENT_TERMS = (
+    "카페", "맛집", "식당", "음식점", "레스토랑", "베이커리",
+    "브런치", "커피", "디저트", "케이크", "라멘", "초밥",
+    "파스타", "피자", "포차", "술집", "바",
+)
+
 # 명시적으로 배제(suppress)되어야 할 어휘 — "X 말고/빼고" 형태로 함께 등장한다.
 # LLM이 부정 대상을 키워드로 추출하지 않을 때 결정적으로 잡는다.
 _EXPLICIT_EXCLUDE_TERMS = (
@@ -75,6 +90,16 @@ _EXPLICIT_EXCLUDE_TERMS = (
 # "로컬/동네/개인/독립/숨은" 의도가 발화에 있으면 "체인"을 자동으로 suppress 한다.
 # (dummy_server._detect_suppressed_keywords 와 동일 정책)
 _LOCAL_INTENT_TERMS = ("로컬", "동네", "개인", "독립", "숨은")
+
+# 이전 추천 결과를 전면 거부하는 표현 — 폴백 감지용
+# 개별 키워드 억제("말고", "빼고")와 달리, 추천 결과 자체를 모두 거부하는 패턴만 포함한다.
+_FALLBACK_PATTERNS = (
+    "다 싫어", "다 별로", "다 아니야", "다 맘에 안 들어", "다 마음에 안 들어",
+    "아무것도", "없어", "그것도 아니야", "그것도 별로",
+    "원하는 거 없어", "마음에 안 들어", "별로야",
+    "다른 걸 추천", "다른 거 추천", "다른 걸로", "다른 거로",
+    "처음부터", "다시 추천", "다시 찾아",
+)
 
 # 너무 광범위해서 특정 장소명 매칭의 근거가 될 수 없는 지명
 # "서울" 이 "남산서울타워" 에 부분 문자열로 우연히 걸리는 것을 막는다.
@@ -111,6 +136,11 @@ _CAPITAL_AREA_REGIONS = frozenset({
     "홍대", "이태원", "명동", "압구정", "청담", "성수", "연남", "망원",
     "북촌", "서촌", "인사동", "여의도", "잠실", "신촌", "가로수길",
     "한남동", "을지로", "익선동", "남산", "한강", "혜화", "대학로",
+    # 서울 주요 관광지·궁궐 — LLM이 자주 누락하는 지명
+    "광화문", "광화문광장", "경복궁", "창덕궁", "덕수궁", "창경궁", "경희궁",
+    "청계천", "종각", "광장시장", "남대문시장", "통인시장",
+    "동대문디자인플라자", "DDP", "롯데월드", "코엑스",
+    "반포", "서래마을", "방배", "노량진", "합정",
     # 경기 시·군
     "수원", "성남", "분당", "판교", "용인", "고양", "일산", "부천", "안양",
     "안산", "화성", "평택", "의정부", "시흥", "파주", "김포", "광명", "군포",
@@ -119,6 +149,28 @@ _CAPITAL_AREA_REGIONS = frozenset({
     # 인천
     "송도", "월미도", "강화도", "영종도", "부평", "차이나타운",
 })
+
+# ============================================================
+# LangSmith 로깅 (선택적 — 패키지 없으면 무시)
+# ============================================================
+
+def _log_to_langsmith(tags: list[str], metadata: dict) -> None:
+    """
+    현재 실행 중인 LangSmith 트레이스에 태그와 메타데이터를 추가한다.
+
+    graph.invoke() 내부에서 호출되므로 LANGCHAIN_TRACING_V2=true 환경변수가
+    설정돼 있으면 자동으로 활성화된다. langsmith 패키지가 없으면 무시한다.
+    """
+    try:
+        from langsmith.run_helpers import get_current_run_tree
+        run = get_current_run_tree()
+        if run is None:
+            return
+        run.add_tags(tags)
+        run.add_metadata(metadata)
+    except Exception:
+        pass  # LangSmith 미설치 또는 트레이스 컨텍스트 밖에서 호출된 경우 무시
+
 
 # ============================================================
 # LLM 초기화 (지연 초기화 — 실제 호출 시점에 생성)
@@ -206,6 +258,25 @@ def supervisor_intake(state: KDiveState) -> KDiveState:
     current_date_str = f"{today.year}년 {today.month}월 {today.day}일"
     state["current_datetime"] = current_date_str
 
+    # ----- 0.2. 폴백 감지 (이전 추천 전면 거부) -----
+    if _detect_fallback(state["user_utterance"], state):
+        _log_to_langsmith(
+            tags=["fallback"],
+            metadata={
+                "event_type": "fallback",
+                "user_utterance": state["user_utterance"],
+                "session_messages_count": len(conv_messages),
+            },
+        )
+        state["needs_user_clarification"] = True
+        state["clarification_type"] = "fallback"
+        state["clarification_question"] = (
+            "이전 추천이 마음에 들지 않으셨군요! 😅\n"
+            "어떤 부분이 아쉬우셨나요? 조금 더 알려주시면 더 잘 맞는 곳으로 찾아드릴게요.\n\n"
+            "예) \"더 조용한 곳이면 좋겠어\", \"강남 쪽으로 다시\", \"이번엔 맛집 말고 카페로\""
+        )
+        return state
+
     # ----- 0.5. 과거 날짜 감지 (정규식) -----
     is_past, detected_date = _detect_past_date(state["user_utterance"], today)
     if is_past:
@@ -254,6 +325,17 @@ def supervisor_intake(state: KDiveState) -> KDiveState:
             for kw in extracted_keywords
         )
         if not has_location_match:
+            # 이 region의 부분 문자열인 짧고 부정확한 location 키워드를 먼저 제거한다.
+            # 예) "광화문" 보강 시 LLM이 잘못 추출한 "광화" 같은 키워드를 정리한다.
+            extracted_keywords = [
+                kw for kw in extracted_keywords
+                if not (
+                    kw.category == "location"
+                    and kw.keyword in region
+                    and kw.keyword != region
+                    and len(kw.keyword) < len(region)
+                )
+            ]
             extracted_keywords.append(
                 _ExtractedKeyword(
                     keyword=region, category="location", agent_hint="any"
@@ -278,6 +360,37 @@ def supervisor_intake(state: KDiveState) -> KDiveState:
             )
         )
         existing_live_tourist_terms.add(term)
+
+    # 멀티턴 위치 컨텍스트 결정적 보강
+    # "거기서", "가까운" 등 대명사·근접 표현이 있는데 LLM이 location을 추출하지 못한 경우,
+    # accumulated_keywords.location을 그대로 이어받는다.
+    # detect_region_scope()는 현재 발화 원문만 스캔하므로 "거기서" 발화에서 이전 지명을
+    # capital_area_regions 루프로 보강하지 못하는 문제를 보완한다.
+    if _is_contextual_followup(state["user_utterance"]):
+        has_any_location = any(kw.category == "location" for kw in extracted_keywords)
+        if not has_any_location:
+            accumulated_loc = (state.get("accumulated_keywords") or {}).get("location") or []
+            for loc in accumulated_loc:
+                extracted_keywords.append(
+                    _ExtractedKeyword(keyword=loc, category="location", agent_hint="any")
+                )
+
+    # foodie 의도 보강: LLM이 "카페"·"맛집" 등을 mood/location으로 오분류하거나 누락해
+    # 라우팅 투표 total=0 → 라우팅 애매 질문이 잘못 트리거되는 경우를 방지한다.
+    existing_live_foodie_terms = {
+        kw.keyword
+        for kw in extracted_keywords
+        if kw.agent_hint == "foodie" and not kw.is_past_action
+    }
+    for term in _scan_foodie_intent_terms(state["user_utterance"]):
+        if term in existing_live_foodie_terms:
+            continue
+        extracted_keywords.append(
+            _ExtractedKeyword(
+                keyword=term, category="place_type", agent_hint="foodie"
+            )
+        )
+        existing_live_foodie_terms.add(term)
 
     # 수도권 밖 지명이 있으면 라우팅하지 않고 사용자를 수도권으로 유도
     if out_of_scope_regions:
@@ -1030,6 +1143,60 @@ def continue_after_clarification(
             fresh_state["previous_turn"] = previous_turn
         return supervisor_intake(fresh_state)
 
+    # ── 폴백 응답 처리 → 사용자의 수정 힌트를 새 발화로 재처리 ──
+    # 이전 추천 결과를 초기화하고 새 조건으로 다시 시작하되,
+    # 위치·장소 유형 등 기존 컨텍스트는 _carried_keywords 로 이어받는다.
+    # 예) "다 별로야" → "더 조용한 곳으로" 발화 시 이전 위치(광화문)를 그대로 유지한다.
+    if clarification_type == "fallback":
+        accumulated = dict(state.get("accumulated_keywords") or {})
+
+        # ── 이전 추천 장소명을 suppressed에 추가 — 폴백 후 동일 장소 재추천 방지 ──
+        prev_place_names: list[str] = []
+        for result_key, list_key, name_key in [
+            ("restaurant_result", "candidates", "name"),
+            ("tourist_result", "recommended_places", "place_name"),
+            ("event_result", "events", "name"),
+        ]:
+            result = state.get(result_key) or {}
+            for item in (result.get(list_key) or []):
+                name = item.get(name_key) or item.get("name", "")
+                if name:
+                    prev_place_names.append(name)
+        if prev_place_names:
+            prev_suppressed = list(accumulated.get("suppressed") or [])
+            accumulated["suppressed"] = list(dict.fromkeys(prev_suppressed + prev_place_names))
+
+        # ── place_type의 agent_hint는 이전 라우팅 결과를 그대로 이어받는다 ──
+        # "any"로 하드코딩하면 _vote_agents에서 tourist로 귀속돼 카페 요청이
+        # 관광지 Agent로 잘못 라우팅되는 문제가 생긴다.
+        prev_targets = set(state.get("target_agents") or [])
+        if AGENT_FOODIE in prev_targets and AGENT_TOURIST not in prev_targets:
+            place_hint = AGENT_FOODIE
+        elif AGENT_TOURIST in prev_targets and AGENT_FOODIE not in prev_targets:
+            place_hint = AGENT_TOURIST
+        else:
+            place_hint = "any"
+
+        carried_keywords = []
+        for kw in (accumulated.get("location") or []):
+            carried_keywords.append({"keyword": kw, "category": "location", "agent_hint": "any", "is_past_action": False})
+        for kw in (accumulated.get("place_type") or []):
+            carried_keywords.append({"keyword": kw, "category": "place_type", "agent_hint": place_hint, "is_past_action": False})
+        for kw in (accumulated.get("food_type") or []):
+            carried_keywords.append({"keyword": kw, "category": "food_type", "agent_hint": AGENT_FOODIE, "is_past_action": False})
+
+        fresh_state: KDiveState = {
+            "user_utterance": user_choice,
+            "onboarding_data": onboarding_data,
+            "messages": state.get("messages") or [],
+            "accumulated_keywords": accumulated,
+        }
+        if previous_turn is not None:
+            fresh_state["previous_turn"] = previous_turn
+        if carried_keywords:
+            fresh_state["_carried_keywords"] = carried_keywords
+        return supervisor_intake(fresh_state)
+
     # ── 범위 밖(수도권 외) 안내 응답 → 사용자의 새 입력을 새 발화로 처리 ──
     if clarification_type == "out_of_scope":
         fresh_state: KDiveState = {
@@ -1190,6 +1357,16 @@ def _validate_keywords_against_utterance(
     utterance_flat = utterance.replace(" ", "")
     validated = []
     for kw in keywords:
+        # 앞부분 비교·강조 부사 제거 — 예) "더 케이크 전문점" → "케이크 전문점"
+        if kw.category in _FACTUAL_CATEGORIES:
+            parts = kw.keyword.split()
+            if len(parts) >= 2 and parts[0] in _LEADING_ADVERBS:
+                kw = _ExtractedKeyword(
+                    keyword=" ".join(parts[1:]),
+                    category=kw.category,
+                    agent_hint=kw.agent_hint,
+                    is_past_action=kw.is_past_action,
+                )
         if kw.agent_hint not in _VALID_AGENT_HINTS:
             kw = _ExtractedKeyword(
                 keyword=kw.keyword,
@@ -1324,6 +1501,29 @@ def _normalize_conflict_choice(user_input: str) -> str:
     return "B"  # 기본값: 현재 요청 기준
 
 
+def _detect_fallback(utterance: str, state: KDiveState) -> bool:
+    """
+    이전 추천 결과를 전면 거부하는 폴백 발화인지 판단한다.
+
+    조건 (둘 다 충족해야 True):
+    1. 직전 턴에 추천 결과가 하나라도 있었을 것 (추천 맥락이 있어야 의미 있음)
+    2. 현재 발화에 _FALLBACK_PATTERNS 중 하나가 포함될 것
+
+    개별 키워드 억제("체인 말고")와의 차이:
+    - 억제: 특정 조건만 빼고 추천을 계속 원하는 경우 → suppressed_keywords 처리
+    - 폴백: 추천 결과 자체가 전부 마음에 안 들어 새로 시작하는 경우 → 되묻기
+    """
+    has_prev_result = any([
+        state.get("tourist_result"),
+        state.get("restaurant_result"),
+        state.get("event_result"),
+        state.get("foodie_result"),
+    ])
+    if not has_prev_result:
+        return False
+    return any(pattern in utterance for pattern in _FALLBACK_PATTERNS)
+
+
 def _is_negative_keyword(keyword: str) -> bool:
     """키워드가 부정/거부 표현인지 판단한다."""
     return any(pattern in keyword for pattern in _NEGATIVE_PATTERNS)
@@ -1336,6 +1536,19 @@ def _scan_tourist_intent_terms(utterance: str) -> list[str]:
     동일한 어휘를 detect 해서 가상 키워드로 라우팅 투표에 합류시킨다.
     """
     return [term for term in _TOURIST_INTENT_TERMS if term in utterance]
+
+
+def _scan_foodie_intent_terms(utterance: str) -> list[str]:
+    """발화 원문에서 foodie 의도 어휘를 결정적으로 잡는다.
+
+    LLM이 "카페"·"맛집" 등을 mood/location으로 오분류하거나 누락해
+    라우팅 투표 total=0 이 되는 경우를 방지한다.
+    가장 긴 매칭 기준으로 dedup — "디저트 카페" 발화 시 "카페"·"디저트" 둘 다 감지하되
+    부분 문자열 중복은 _scan_regions 와 같은 방식으로 제거한다.
+    """
+    matched = [term for term in _FOODIE_INTENT_TERMS if term in utterance]
+    # 다른 매칭의 부분 문자열인 짧은 항목 제거 (예: "카페" ⊂ "북카페" → "카페" 제거)
+    return [t for t in matched if not any(t != other and t in other for other in matched)]
 
 
 def _detect_explicit_exclusions(utterance: str) -> list[str]:

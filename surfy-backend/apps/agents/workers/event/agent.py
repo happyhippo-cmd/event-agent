@@ -235,6 +235,14 @@ def run_event_agent_for_state(state: KDiveState, top_k: int = DEFAULT_EVENT_TOP_
     if AGENT_EVENT not in target_agents:
         return state
 
+    # travel_phase에 따라 추천 결과 수 조정
+    # - during_trip : 지금 당장 갈 수 있는 이벤트 위주로 3개 (기본값 유지)
+    # - pre_trip    : 계획 단계라 다양한 이벤트 선택지 5개
+    # - unknown     : 기본값 유지
+    travel_phase = state.get("travel_phase", "unknown")
+    if travel_phase == "pre_trip":
+        top_k = 5
+
     agent_contexts = state.get("agent_taste_contexts") or {}
     result = run_event_agent(
         query=state["user_utterance"],

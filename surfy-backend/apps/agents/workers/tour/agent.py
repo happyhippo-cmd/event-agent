@@ -834,6 +834,16 @@ def run_tour_agent_for_state(state: KDiveState, radius_km: float = 3.0) -> KDive
     if AGENT_TOURIST not in (state.get("target_agents") or []):
         return state
 
+    # travel_phase에 따라 검색 반경 조정
+    # - during_trip : 지금 이동 중 → 가까운 곳 위주 (1.5km)
+    # - pre_trip    : 여행 계획 중 → 더 넓은 범위 탐색 (5.0km)
+    # - unknown     : 기본값 유지 (3.0km)
+    travel_phase = state.get("travel_phase", "unknown")
+    if travel_phase == "during_trip":
+        radius_km = 1.5
+    elif travel_phase == "pre_trip":
+        radius_km = 5.0
+
     agent_contexts = state.get("agent_taste_contexts") or {}
     taste = agent_contexts.get(AGENT_TOURIST) or state.get("taste_context") or {}
     location_keywords = taste.get("location_keywords") or []

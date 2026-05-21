@@ -28,9 +28,9 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 from apps.agents.state import AGENT_FOODIE, KDiveState, OnboardingData, PreviousTurn
 from apps.agents.supervisor import supervisor_intake, continue_after_clarification
-# 주의: restaurant worker(run_foodie_agent_for_state)는 chromadb 등 무거운 의존성을 끌어온다.
-# 자동 케이스(--cases)는 supervisor 단까지만 검증하므로 worker 를 import 하지 않는다.
-# 대화형 모드(run_interactive)에서만 지연 import 한다.
+# 주의: worker와 graph는 chromadb 등 무거운 의존성을 끌어온다.
+# 자동 케이스(--cases)는 supervisor 단까지만 검증하므로 import 하지 않는다.
+# 대화형 모드(run_interactive)에서만 build_graph()를 지연 import 한다.
 
 # ============================================================
 # 더미 데이터 — 테스트용 가상 사용자 프로필
@@ -250,17 +250,16 @@ def print_result(state: KDiveState):
 
 def run_interactive(use_tpo_profile: bool = False):
     """
-    대화형 테스트 모드.
+    대화형 테스트 모드 — graph.invoke() + MemorySaver 기반.
+
+    graph가 thread_id별로 state를 자동 관리하므로
+    세션 히스토리·되묻기 대기를 수동으로 관리하지 않아도 된다.
 
     Args:
         use_tpo_profile: True 면 ONBOARDING_ENERGETIC (힙합/EDM) 프로필 사용 → TPO 충돌 검증용
                          False(기본)면 DUMMY_ONBOARDING (잔잔한 음악) 프로필 사용
     """
-    # 대화형 모드에서만 worker 를 지연 import (chromadb 등 무거운 의존성)
-    from apps.agents.workers.restaurant import (
-        run_restaurant_agent_for_state as run_foodie_agent_for_state,
-    )
-    from apps.agents.workers.tour.agent import run_tour_agent_for_state
+    from apps.agents.graph import build_graph
 
     onboarding = ONBOARDING_ENERGETIC if use_tpo_profile else DUMMY_ONBOARDING
     profile_label = "⚡ 활기찬 음악 (TPO 충돌 테스트용)" if use_tpo_profile else "🎵 잔잔한 음악 (기본)"
@@ -281,27 +280,13 @@ def run_interactive(use_tpo_profile: bool = False):
     print("  💬  사용자 메시지를 입력하세요. 종료하려면 'exit' 입력.")
     print()
 
-    # 대화 히스토리 (멀티턴 검증용 — 세션 내 누적)
-    session_messages: list[dict] = []
-    session_accumulated_keywords: dict = {}
-
-    # 되묻기 대기 중인 state 보관 (A/B/C 응답 처리용)
-    pending_clarification_state: KDiveState | None = None
+    graph = build_graph()
+    thread_config = {"configurable": {"thread_id": "interactive-test"}}
+    is_first_turn = True
 
     while True:
         try:
-            # 되묻기 중이면 프롬프트에 힌트 표시
-            if pending_clarification_state is not None:
-                c_type = pending_clarification_state.get("clarification_type", "tpo_conflict")
-                if c_type == "routing":
-                    prompt = "  나 (1/2/3) > "
-                elif c_type == "out_of_scope":
-                    prompt = "  나 > "
-                else:
-                    prompt = "  나 (A/B/C) > "
-            else:
-                prompt = "  나 > "
-            user_input = input(prompt).strip()
+            user_input = input("  나 > ").strip()
         except (KeyboardInterrupt, EOFError):
             print("\n\n  👋  테스트 종료.")
             break
@@ -313,47 +298,22 @@ def run_interactive(use_tpo_profile: bool = False):
             break
 
         print()
-        print("  ⏳  Supervisor 처리 중...")
+        print("  ⏳  처리 중...")
 
         try:
-            # ── 되묻기 응답 처리 (A/B/C 또는 자유 답변) ──
-            if pending_clarification_state is not None:
-                result_state = continue_after_clarification(
-                    pending_state=pending_clarification_state,
-                    user_choice=user_input,
-                )
-                pending_clarification_state = None
-                session_messages = list(result_state.get("messages") or session_messages)
-                session_accumulated_keywords = dict(
-                    result_state.get("accumulated_keywords") or session_accumulated_keywords
-                )
-                if not result_state.get("needs_user_clarification"):
-                    result_state = run_tour_agent_for_state(result_state)
-                    result_state = run_foodie_agent_for_state(result_state)
-
-            # ── 새 발화 처리 ──
-            else:
-                state: KDiveState = {
+            # 첫 번째 턴에만 onboarding_data와 previous_turn을 함께 넘긴다.
+            # 이후 턴은 MemorySaver가 state를 자동으로 유지하므로 user_utterance만 전달.
+            if is_first_turn:
+                invoke_input: dict = {
                     "user_utterance": user_input,
                     "onboarding_data": onboarding,
                     "previous_turn": DUMMY_PREVIOUS_TURN,
-                    "messages": list(session_messages),  # supervisor가 내부에서 append함
-                    "accumulated_keywords": dict(session_accumulated_keywords),
                 }
-                result_state = supervisor_intake(state)
+                is_first_turn = False
+            else:
+                invoke_input = {"user_utterance": user_input}
 
-                # supervisor가 누적한 messages를 세션에 동기화
-                session_messages = list(result_state.get("messages") or [])
-                session_accumulated_keywords = dict(result_state.get("accumulated_keywords") or {})
-
-                if not result_state.get("needs_user_clarification"):
-                    result_state = run_tour_agent_for_state(result_state)
-                    result_state = run_foodie_agent_for_state(result_state)
-
-            # 되묻기가 필요한 경우 → 다음 입력을 위해 보관
-            if result_state.get("needs_user_clarification"):
-                pending_clarification_state = result_state
-
+            result_state = graph.invoke(invoke_input, config=thread_config)
             print_result(result_state)
 
         except Exception as e:
@@ -361,7 +321,6 @@ def run_interactive(use_tpo_profile: bool = False):
             print(f"  ❌  오류 발생: {e}")
             print("      .env 파일에 OPENAI_API_KEY가 올바르게 설정됐는지 확인해줘.")
             print()
-            pending_clarification_state = None  # 오류 시 대기 상태 초기화
 
 # ============================================================
 # 자동 케이스 모드 — 헬퍼

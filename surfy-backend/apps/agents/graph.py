@@ -62,20 +62,17 @@ def run_tourist_node(state: KDiveState) -> KDiveState:
 
 def run_foodie_node(state: KDiveState) -> KDiveState:
     """Foodie worker 노드."""
-    state["foodie_result"] = run_foodie_agent_for_state(state)
-    return state
+    return run_foodie_agent_for_state(state)
 
 
 def run_restaurant_node(state: KDiveState) -> KDiveState:
     """Restaurant worker 노드."""
-    state["restaurant_result"] = run_restaurant_agent_for_state(state)
-    return state
+    return run_restaurant_agent_for_state(state)
 
 
 def run_event_node(state: KDiveState) -> KDiveState:
     """Event worker 노드."""
-    state["event_result"] = run_event_agent_for_state(state)
-    return state
+    return run_event_agent_for_state(state)
 
 
 def run_workers_node(state: KDiveState) -> KDiveState:

@@ -37,7 +37,7 @@ function Toggle({ checked, onChange }) {
 
 function SectionCard({ icon, title, children }) {
   return (
-    <div className="bg-white rounded-2xl border border-[rgba(0,0,0,0.07)] overflow-hidden">
+    <div className="bg-surface rounded-2xl border border-[rgba(0,0,0,0.06)] overflow-hidden">
       <div className="flex items-center gap-3 px-6 py-5 border-b border-[rgba(0,0,0,0.06)]">
         <span className="text-[22px]">{icon}</span>
         <h2 className="font-pretendard text-[15px] font-bold text-text tracking-[-0.01em]">
@@ -63,7 +63,7 @@ function InputField({ label, value, onChange, type = 'text', placeholder = '' })
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className="flex-1 h-9 px-3 rounded-lg text-[13px] text-text font-pretendard bg-[#f5f5f7] border border-transparent focus:border-[rgba(0,168,232,0.4)] focus:bg-white outline-none transition-all"
+        className="flex-1 h-9 px-3 rounded-lg text-[13px] text-text font-pretendard bg-white border border-[rgba(0,0,0,0.08)] focus:border-[rgba(0,168,232,0.4)] outline-none transition-all"
         style={{ maxWidth: 280 }}
       />
     </div>
@@ -194,14 +194,22 @@ export default function MyPage() {
   return (
     <section
       id="myPage"
-      className="min-h-screen bg-[#f5f5f7] pt-[61px]"
+      className="h-[100dvh] overflow-hidden bg-white max-[760px]:h-auto max-[760px]:min-h-screen max-[760px]:overflow-visible"
     >
-      <div className="mx-auto w-full max-w-[720px] px-[clamp(16px,5vw,40px)] py-10">
+      <div className="mx-auto flex h-full w-[min(960px,calc(100%-96px))] flex-col gap-[clamp(12px,1.6vh,20px)] pb-[3vh] pt-[max(84px,8vh)] max-[760px]:h-auto max-[760px]:w-[calc(100%-32px)] max-[760px]:gap-5 max-[760px]:pb-8 max-[760px]:pt-[78px]">
+
+        {/* ── 페이지 헤더 ── */}
+        <header className="flex items-center justify-between gap-5 max-[760px]:flex-col max-[760px]:items-start">
+          <h1 className="text-[20px] font-bold uppercase tracking-[0.12em] text-accent">My Page</h1>
+        </header>
+
+        {/* ── 스크롤 영역 ── */}
+        <div className="kd-history-scroll min-h-0 flex-1 overflow-y-auto pr-3 pt-2 scroll-pt-2 max-[760px]:h-auto max-[760px]:overflow-visible max-[760px]:pr-0">
+        <div className="flex flex-col gap-4 pb-8">
 
         {/* ── 프로필 헤더 카드 ── */}
         <div
-          className="bg-white rounded-2xl border border-[rgba(0,0,0,0.07)] px-6 py-7 mb-5 flex items-center gap-5"
-          style={{ boxShadow: '0 2px 16px rgba(0,168,232,0.06)' }}
+          className="bg-surface rounded-2xl border border-[rgba(0,0,0,0.06)] px-6 py-6 flex items-center gap-5"
         >
           {/* 아바타 */}
           <div
@@ -241,7 +249,7 @@ export default function MyPage() {
         </div>
 
         {/* ── 나의 K-Dive 활동 통계 (신규) ── */}
-        <div className="mb-5">
+        <div>
           <p className="font-pretendard text-[11px] font-bold tracking-[0.1em] uppercase text-muted mb-2.5 px-1">
             My K-Dive
           </p>
@@ -254,18 +262,18 @@ export default function MyPage() {
             <StatCard
               count={likedPlaceKeys?.size ?? 0}
               label={'저장한\n명소'}
-              color="rgba(0,168,232,0.05)"
+              color="rgba(0,168,232,0.06)"
             />
             <StatCard
               count={likedFoodKeys?.size ?? 0}
               label={'저장한\n음식점'}
-              color="rgba(0,168,232,0.03)"
+              color="rgba(0,168,232,0.04)"
             />
           </div>
         </div>
 
         {/* ── 프로필 설정 ── */}
-        <div className="mb-4">
+        <div>
           <SectionCard icon="👤" title="프로필 설정">
             <div className="flex flex-col">
               <InputField label="이름" value={name} onChange={setName} placeholder="이름 입력" />
@@ -312,7 +320,7 @@ export default function MyPage() {
         </div>
 
         {/* ── 언어 설정 ── */}
-        <div className="mb-4">
+        <div>
           <SectionCard icon="🌐" title="언어 설정">
             <div className="flex items-center justify-between">
               <div>
@@ -346,7 +354,7 @@ export default function MyPage() {
         </div>
 
         {/* ── Surfer 설정 ── */}
-        <div className="mb-4">
+        <div>
           <SectionCard icon="🤖" title="Surfer 설정">
             <div className="flex items-center justify-between">
               <div>
@@ -376,7 +384,7 @@ export default function MyPage() {
         </div>
 
         {/* ── 알림 설정 (신규) ── */}
-        <div className="mb-4">
+        <div>
           <SectionCard icon="🔔" title="알림 설정">
             <div className="flex flex-col gap-4">
               {[
@@ -415,7 +423,7 @@ export default function MyPage() {
         </div>
 
         {/* ── 비밀번호 변경 ── */}
-        <div className="mb-4">
+        <div>
           <SectionCard icon="🔒" title="비밀번호 변경">
             <form onSubmit={handleChangePw} className="flex flex-col gap-0">
               <InputField
@@ -463,7 +471,7 @@ export default function MyPage() {
         </div>
 
         {/* ── 회원 탈퇴 ── */}
-        <div className="mb-10">
+        <div>
           <SectionCard icon="⚠️" title="회원 탈퇴">
             {!deleteConfirm ? (
               <div className="flex items-center justify-between">
@@ -512,6 +520,8 @@ export default function MyPage() {
           </SectionCard>
         </div>
 
+        </div>{/* flex flex-col gap-4 */}
+        </div>{/* kd-history-scroll */}
       </div>
     </section>
   );

@@ -71,13 +71,13 @@ def import_csv(conn: sqlite3.Connection, csv_path: Path) -> tuple[int, int]:
                     description, thumbnail_url, detail_url, store_url,
                     hashtags, main_category, sub_category, detail_category,
                     music_genre, mood_tags, activity_tags, theme_tags,
-                    space_tags, emotion_tags, audience_tags, vector_summary,
+                    space_tags, emotion_tags, vector_summary,
                     commerciality, exhibition_type,
                     new_main_category, new_sub_category, region,
                     new_mood_tags, new_audience_tags, vector_summary_v2,
                     created_at, updated_at
                 ) VALUES (
-                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'',
+                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'',
                     datetime('now'), datetime('now')
                 )
                 """,
@@ -103,7 +103,6 @@ def import_csv(conn: sqlite3.Connection, csv_path: Path) -> tuple[int, int]:
                     row.get("theme_tags", "[]"),
                     row.get("space_tags", "[]"),
                     row.get("emotion_tags", "[]"),
-                    row.get("audience_tags", "[]"),
                     row.get("vector_summary", ""),
                     row.get("commerciality", ""),
                     row.get("exhibition_type", ""),

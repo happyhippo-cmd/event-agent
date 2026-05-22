@@ -35,10 +35,21 @@ def make_event_text(row: dict[str, Any]) -> str:
     parts = []
     if row.get("title"):
         parts.append(f"title: {row['title']}")
-    if row.get("new_main_category"):
-        parts.append(f"category: {row['new_main_category']}")
-    if row.get("new_sub_category"):
-        parts.append(f"subcategory: {row['new_sub_category']}")
+    main_cat = row.get("new_main_category") or row.get("main_category")
+    if main_cat:
+        parts.append(f"category: {main_cat}")
+    sub_cat = row.get("new_sub_category") or row.get("sub_category")
+    if sub_cat:
+        sub_cat_text = sub_cat
+        if isinstance(sub_cat, str) and sub_cat.strip().startswith("["):
+            try:
+                parsed = json.loads(sub_cat)
+                if isinstance(parsed, list):
+                    sub_cat_text = " ".join(str(v) for v in parsed if v)
+            except json.JSONDecodeError:
+                pass
+        if sub_cat_text:
+            parts.append(f"subcategory: {sub_cat_text}")
     if row.get("music_genre"):
         parts.append(f"genre: {row['music_genre']}")
     if row.get("description"):
@@ -164,11 +175,19 @@ def get_events_by_ids(event_ids: list[str]) -> list[dict[str, Any]]:
 
 
 def _metadata(row: dict[str, Any]) -> dict[str, Any]:
+    sub = row.get("new_sub_category") or row.get("sub_category") or ""
+    if isinstance(sub, str) and sub.strip().startswith("["):
+        try:
+            parsed = json.loads(sub)
+            if isinstance(parsed, list):
+                sub = ", ".join(str(v) for v in parsed if v)
+        except json.JSONDecodeError:
+            pass
     return {
         "event_id": str(row.get("id", "")),
         "title": str(row.get("title") or ""),
-        "category": str(row.get("new_main_category") or row.get("category") or ""),
-        "subcategory": str(row.get("new_sub_category") or ""),
+        "category": str(row.get("new_main_category") or row.get("main_category") or row.get("category") or ""),
+        "subcategory": str(sub),
         "location": str(row.get("location") or ""),
         "region": str(row.get("region") or ""),
         "start_date": str(row.get("start_date") or ""),

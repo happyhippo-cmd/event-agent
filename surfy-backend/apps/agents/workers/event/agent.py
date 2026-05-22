@@ -19,6 +19,9 @@ BASE_DIR = Path(__file__).resolve().parents[4]
 load_dotenv(BASE_DIR / ".env")
 
 DEFAULT_EVENT_TOP_K = 3
+# curate_events_with_llm 에 넘기는 후보 상한. 토큰/지연을 줄이려면 작게,
+# LLM 선택지를 넓히려면 크게. 10 은 GPT-4 기준 프롬프트 길이/품질 균형점.
+CURATION_CANDIDATE_LIMIT = 10
 EVENT_DB_PATH = Path(os.getenv("EVENT_DB_PATH", BASE_DIR / "data" / "event_db.sqlite3"))
 EVENT_TABLE = os.getenv("EVENT_DB_TABLE", "events_event")
 
@@ -88,9 +91,10 @@ CATEGORY_KEYWORDS = {
 
 SEARCH_FIELDS = (
     "title", "description", "hashtags", "mood_tags", "activity_tags",
-    "theme_tags", "space_tags", "audience_tags", "music_genre",
+    "audience_tags", "music_genre",
     "new_mood_tags", "new_audience_tags", "new_main_category",
-    "new_sub_category", "region", "location",
+    "new_sub_category", "main_category", "sub_category",
+    "region", "location",
 )
 
 # 힙하고 활동적인 이벤트를 우선 노출하기 위한 mood 가중치
@@ -148,86 +152,20 @@ def run_event_agent(
     history: list[dict[str, str]] | None = None,
     top_k: int = DEFAULT_EVENT_TOP_K,
 ) -> dict[str, Any]:
-    """Return event recommendations for Surfy's worker-agent pipeline."""
+    """Return event recommendations for Surfy's worker-agent pipeline.
 
-    mood = _event_mood_from_taste(taste_context or {})
-    location_keywords = [
-        str(loc) for loc in (taste_context or {}).get("location_keywords") or [] if loc
-    ]
-    genre_filter = _detect_genre_filter(query, mood)
+    내부 흐름은 LangGraph(graph.py) 로 위임한다. 외부 호출부와의 입출력 계약은
+    그대로 유지하므로, 기존 호출 코드(dummy_server 등)는 수정 없이 동작한다.
+    """
+    # 순환 import 방지를 위해 함수 안에서 import (graph.py 가 이 모듈을 import 함)
+    from .graph import run_event_graph
 
-    try:
-        events = _retrieve_and_hard_filter(query, mood, location_keywords, genre_filter)
-    except Exception as exc:
-        return {
-            "status": "error",
-            "message": f"Event DB 조회 중 오류가 발생했어요: {exc}",
-            "recommended_events": [],
-        }
-
-    # Function calling: 하드 필터로 후보가 0건이면 LLM이 어떤 제약을 완화할지 결정.
-    # tool_calls API로 진짜 도구 호출 한 번 수행 — 무한 루프 방지 위해 retry는 1회.
-    relax_note = ""
-    # 완화가 일어났을 때 curate 단계로 넘길 taste_context도 같이 풀어야 한다.
-    # 그렇지 않으면 curate 프롬프트의 0순위 룰("지역명이 명시된 경우 해당 지역만 선정")이
-    # 다른 지역 후보를 모두 거부해서 결과가 다시 비게 된다.
-    curate_taste_context = taste_context or {}
-    if not events and (location_keywords or genre_filter):
-        relaxation = _ask_llm_for_relaxation(
-            query=query, location_keywords=location_keywords, genre_filter=genre_filter,
-        )
-        if relaxation:
-            relaxed_loc = [] if relaxation.get("relax_location") else location_keywords
-            relaxed_genre = [] if relaxation.get("relax_genre") else genre_filter
-            if relaxed_loc != location_keywords or relaxed_genre != genre_filter:
-                try:
-                    events = _retrieve_and_hard_filter(query, mood, relaxed_loc, relaxed_genre)
-                except Exception:
-                    events = []
-                if events:
-                    relax_note = relaxation.get("note") or ""
-                    curate_taste_context = dict(taste_context or {})
-                    if relaxation.get("relax_location"):
-                        curate_taste_context["location_keywords"] = []
-
-    if not events:
-        return {
-            "status": "no_results",
-            "message": "조건에 맞는 이벤트 추천을 찾지 못했어요. 지역이나 이벤트 종류를 조금 더 알려주시면 다시 찾아볼게요.",
-            "recommended_events": [],
-        }
-
-    curated = curate_events_with_llm(
-        events=events,
+    return run_event_graph(
         query=query,
-        taste_context=curate_taste_context,
-        history=history or [],
+        taste_context=taste_context,
+        history=history,
         top_k=top_k,
     )
-
-    # curated가 None이면 LLM 호출 자체가 실패한 것 → 폴백
-    if curated is None:
-        curated = [_event_to_card(ev, reason=_fallback_reason(ev, query)) for ev in events[:top_k]]
-    # curated가 빈 배열이면 LLM이 의도적으로 비움 (맞는 후보 없음)
-    elif not curated:
-        return {
-            "status": "no_results",
-            "message": "요청하신 조건에 딱 맞는 이벤트를 찾지 못했어요. 다른 장르나 키워드로 다시 알려주시면 더 잘 찾아드릴게요.",
-            "recommended_events": [],
-        }
-
-    # relax_note 있을 땐 _build_event_response_message가 내부에서 자연스럽게 엮어준다.
-    final_msg = _build_event_response_message(
-        query, curate_taste_context, curated[:top_k], relax_note=relax_note,
-    )
-    return {
-        "status": "ok",
-        "message": final_msg,
-        # 호출 측(dummy_server 등)이 최종 응답에 prepend할 수 있도록 별도 필드로도 노출.
-        # 단, message에 이미 relax_note가 포함되어 있으니 dummy_server는 중복 prepend 안 함.
-        "relaxation_note": relax_note,
-        "recommended_events": curated[:top_k],
-    }
 
 
 def run_event_agent_for_state(state: KDiveState, top_k: int = DEFAULT_EVENT_TOP_K) -> KDiveState:
@@ -261,8 +199,8 @@ def _build_event_response_message(
     설명하므로, 표준 인트로까지 붙이면 인트로가 두 번이라 어색해진다.
     """
     query_text = query or ""
-    locations = [str(loc) for loc in (taste_context.get("location_keywords") or []) if loc]
-    suppressed = [str(item) for item in (taste_context.get("suppressed_keywords") or []) if item]
+    locations = _safe_str_list(taste_context.get("location_keywords"))
+    suppressed = _safe_str_list(taste_context.get("suppressed_keywords"))
     event_terms = _flatten_terms(taste_context, ("event_type_keywords", "current_mood_keywords"))
     mood_terms = [
         term
@@ -509,7 +447,7 @@ def _event_score(
         row,
         (
             "hashtags", "mood_tags", "emotion_tags", "activity_tags",
-            "theme_tags", "space_tags", "audience_tags", "music_genre",
+            "audience_tags", "music_genre",
             "new_mood_tags", "new_audience_tags", "vector_summary", "vector_summary_v2",
         ),
     )
@@ -529,7 +467,7 @@ def _event_score(
         score += 0.1
 
     # 힙한/트렌디한 mood 태그 보너스
-    mood_text = _row_text(row, ("new_mood_tags", "mood_tags"))
+    mood_text = _row_text(row, ("new_mood_tags", "mood_tags", "new_audience_tags", "audience_tags"))
     hip_count = sum(1 for tag in HIP_MOOD_TAGS if tag in mood_text)
     score += hip_count * 1.5
 
@@ -703,15 +641,17 @@ def curate_events_with_llm(
         return []
 
     event_summaries = []
-    for idx, event in enumerate(events[:10], 1):
+    for idx, event in enumerate(events[:CURATION_CANDIDATE_LIMIT], 1):
         event_summaries.append(
             {
                 "index": idx,
                 "title": _event_attr(event, "title"),
                 "location": _event_attr(event, "location"),
                 "date": _date_range(event),
-                "category": _event_attr(event, "new_main_category"),
-                "subcategory": _event_attr(event, "new_sub_category"),
+                "category": _event_attr(event, "new_main_category") or _event_attr(event, "main_category"),
+                "subcategory": _scalarish(
+                    _event_attr(event, "new_sub_category") or _event_attr(event, "sub_category")
+                ),
                 "exhibition_type": _event_attr(event, "exhibition_type"),
                 "has_image": bool(_event_attr(event, "thumbnail_url")),
                 "mood_tags": _listish(_event_attr(event, "new_mood_tags") or _event_attr(event, "mood_tags"))[:5],
@@ -726,16 +666,22 @@ def curate_events_with_llm(
             }
         )
 
+    def _history_line(item: Any) -> str:
+        if not isinstance(item, dict):
+            return ""
+        role = item.get("role") or ""
+        content = " ".join(_safe_str_list(item.get("content")))
+        return f"{role}: {content[:160]}" if content else ""
+
     recent_history = "\n".join(
-        f"{item.get('role')}: {str(item.get('content') or '')[:160]}"
-        for item in history[-4:]
+        line for line in (_history_line(item) for item in (history or [])[-4:]) if line
     )
     taste_terms = _flatten_terms(
         taste_context,
         ("event_type_keywords", "mood_keywords", "current_mood_keywords", "preferred_music"),
     )
-    explicit_locations = [str(loc) for loc in (taste_context.get("location_keywords") or []) if loc]
-    suppressed = [str(s) for s in (taste_context.get("suppressed_keywords") or []) if s]
+    explicit_locations = _safe_str_list(taste_context.get("location_keywords"))
+    suppressed = _safe_str_list(taste_context.get("suppressed_keywords"))
 
     prompt = (
         f"[사용자 질문] {query}\n\n"
@@ -993,14 +939,34 @@ def _event_mood_from_taste(taste_context: dict[str, Any]) -> str:
     return " ".join(terms)
 
 
+def _safe_str_list(value: Any) -> list[str]:
+    """taste_context/history 값에서 검색 키워드로 안전하게 쓸 문자열 리스트를 뽑는다.
+
+    - list/tuple: 각 원소를 재귀적으로 평탄화
+    - dict: 값들만 평탄화 (구조화된 입력이 와도 의미만 추출)
+    - 그 외: 문자열로 변환 (None/빈문자열은 제외)
+    이렇게 해야 set/dict key로 사용해도 unhashable 에러가 나지 않는다.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        out: list[str] = []
+        for item in value:
+            out.extend(_safe_str_list(item))
+        return out
+    if isinstance(value, dict):
+        out = []
+        for v in value.values():
+            out.extend(_safe_str_list(v))
+        return out
+    text = str(value).strip()
+    return [text] if text else []
+
+
 def _flatten_terms(data: dict[str, Any], keys: tuple[str, ...]) -> list[str]:
     terms: list[str] = []
     for key in keys:
-        value = data.get(key)
-        if isinstance(value, list):
-            terms.extend(str(item) for item in value if item)
-        elif value:
-            terms.append(str(value))
+        terms.extend(_safe_str_list(data.get(key)))
     return list(dict.fromkeys(terms))
 
 
@@ -1025,11 +991,82 @@ def _fix_thumbnail_url(url: str | None) -> str | None:
     return url
 
 
+_WEEKDAY_KO = ["월", "화", "수", "목", "금", "토", "일"]
+_PERFORMANCE_CATEGORIES = {"공연", "페스티벌"}
+
+
+def _format_md_with_day(iso_date: str) -> str | None:
+    """'2026-05-22' → '5월 22일 (금)'"""
+    if not iso_date:
+        return None
+    try:
+        from datetime import date as _date
+        d = _date.fromisoformat(iso_date)
+    except Exception:
+        return None
+    return f"{d.month}월 {d.day}일 ({_WEEKDAY_KO[d.weekday()]})"
+
+
+def _format_open_days(open_days: list[str]) -> str:
+    """['월','화','수','목','금','토','일'] → '매일',
+    연속 구간이면 '월-목', 흩어진 경우엔 '월, 수, 금'."""
+    if not open_days:
+        return ""
+    if len(open_days) == 7:
+        return "매일"
+    indices = sorted({_WEEKDAY_KO.index(d) for d in open_days if d in _WEEKDAY_KO})
+    if not indices:
+        return ""
+    # 연속 구간이면 '시작-끝'
+    if all(b - a == 1 for a, b in zip(indices, indices[1:])):
+        return f"{_WEEKDAY_KO[indices[0]]}-{_WEEKDAY_KO[indices[-1]]}"
+    return ", ".join(_WEEKDAY_KO[i] for i in indices)
+
+
+def _build_schedule_display(event: Any, category: str) -> str | None:
+    """카드에 보여줄 운영시간/공연일정 문자열. 정보 없으면 None."""
+    if category in _PERFORMANCE_CATEGORIES:
+        start = _event_attr(event, "start_date")
+        end = _event_attr(event, "end_date")
+        start_s = _format_md_with_day(start)
+        if not start_s:
+            return None
+        if not end or end == start:
+            return start_s
+        end_s = _format_md_with_day(end)
+        return f"{start_s} ~ {end_s}" if end_s else start_s
+
+    # 팝업/전시: 시간 + 요일
+    opens = _event_attr(event, "opens_at")
+    closes = _event_attr(event, "closes_at")
+    days_raw = _listish(_event_attr(event, "open_days"))
+    days_text = _format_open_days(days_raw)
+
+    if opens and closes and days_text:
+        return f"{days_text} {opens} ~ {closes}"
+    if opens and closes:
+        return f"{opens} ~ {closes}"
+    if days_text:
+        return days_text
+    return None
+
+
 def _event_to_card(event: Any, reason: str) -> dict[str, Any]:
     title = str(_event_attr(event, "title") or "이벤트")
-    category = _event_attr(event, "new_main_category") or _event_attr(event, "category") or "이벤트"
-    subcategory = _event_attr(event, "new_sub_category")
+    category = (
+        _event_attr(event, "new_main_category")
+        or _event_attr(event, "main_category")
+        or _event_attr(event, "category")
+        or "이벤트"
+    )
+    subcategory = _scalarish(
+        _event_attr(event, "new_sub_category") or _event_attr(event, "sub_category")
+    )
     photo = _fix_thumbnail_url(_event_attr(event, "thumbnail_url"))
+
+    schedule_display = _build_schedule_display(event, str(category))
+    schedule_label = "공연일정" if str(category) in _PERFORMANCE_CATEGORIES else "운영시간"
+
     return {
         "id": _event_attr(event, "id") or title,
         "title": title,
@@ -1046,6 +1083,11 @@ def _event_to_card(event: Any, reason: str) -> dict[str, Any]:
         "store_url": _fix_detail_url(_event_attr(event, "store_url")),
         "description": str(_event_attr(event, "description") or "")[:300],
         "hashtags": _listish(_event_attr(event, "hashtags")),
+        "opens_at": _event_attr(event, "opens_at"),
+        "closes_at": _event_attr(event, "closes_at"),
+        "open_days": _listish(_event_attr(event, "open_days")),
+        "schedule_label": schedule_label if schedule_display else None,
+        "schedule_display": schedule_display,
         "reason": reason,
         "curation": reason or _fallback_reason(event, ""),
     }
@@ -1071,7 +1113,7 @@ def _polish_event_reason(reason: str, event: Any, query: str) -> str:
     if not hook:
         return cleaned or _fallback_reason(event, query)
 
-    category = str(_event_attr(event, "new_main_category") or "")
+    category = str(_event_attr(event, "new_main_category") or _event_attr(event, "main_category") or "")
     if category == "팝업스토어":
         return f"{hook} 소개글에 보이는 콘텐츠가 뚜렷해서 가볍게 들러보기 좋아요."
     if category == "전시":
@@ -1118,7 +1160,7 @@ def _first_sentence(text: str, max_len: int = 95) -> str:
 def _fallback_reason(event: Any, query: str) -> str:
     title = _event_attr(event, "title") or "이 이벤트"
     location = _event_attr(event, "location")
-    category = _event_attr(event, "new_main_category") or "이벤트"
+    category = _event_attr(event, "new_main_category") or _event_attr(event, "main_category") or "이벤트"
     where = f"{location}에서 열리는 " if location else ""
     query_text = f" '{query}' 요청과 맞는" if query else ""
     return f"{title}은 {where}{category}예요.{query_text} 후보라 일정에 넣어볼 만해요."
@@ -1140,6 +1182,16 @@ def _date_range(event: Any) -> str:
     if start and end:
         return f"{start} ~ {end}"
     return str(start or end or "")
+
+
+def _scalarish(value: Any) -> str:
+    """JSON 배열 문자열로 저장된 값을 사용자 표시용 한 줄 문자열로 변환.
+
+    sub_category 같은 컬럼이 ["패션"], ["복합"] 형태라서 카드에 그대로 노출하면
+    어색하다. 평문이면 그대로, 리스트면 쉼표로 join한 결과를 돌려준다.
+    """
+    items = _listish(value)
+    return ", ".join(items)
 
 
 def _listish(value: Any) -> list[str]:

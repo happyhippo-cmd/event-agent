@@ -1,23 +1,36 @@
 """
-Tour Worker Agent — entry node
+Tour Worker Agent — entry node (v2)
 흐름: 자연어 입력 → [LLM] 위치+취향 추출 → DB 조회
-      DB 있으면 → DB 주변 검색 → [LLM] 선별 → JSON
-      DB 없으면 → Kakao API 검색 → [LLM] 선별 → JSON
+      DB 있으면 → DB 주변 검색 → [LLM] 선별 → [LLM] 큐레이션 → dict
+      DB 없으면 → Kakao API 검색 → [LLM] 선별 → [LLM] 큐레이션 → dict
+
+[LangSmith 트레이싱]
+.env 파일에 아래 값 추가:
+  LANGCHAIN_TRACING_V2=true
+  LANGCHAIN_API_KEY=발급받은_키
+  LANGCHAIN_PROJECT=tourism-agent
 """
 
+from __future__ import annotations
+
+import math
 import os
+import math
 import sqlite3
 import json
 import requests
 from pathlib import Path
 from dotenv import load_dotenv
+from langsmith import traceable
+from langsmith.wrappers import wrap_openai
 
 from apps.agents.utils import haversine_km, topic_label
+from apps.agents.state import KDiveState, AGENT_TOURIST
 
 BASE_DIR = Path(__file__).resolve().parents[4]
 load_dotenv(BASE_DIR / ".env")
 
-DB_PATH       = os.getenv("TOURISM_DB_PATH", str(BASE_DIR / "data" / "merged_tourism.db"))
+DB_PATH       = os.getenv("TOURISM_DB_PATH", str(BASE_DIR / "data" / "filtered_merged_tourism.db"))
 KAKAO_API_KEY = os.getenv("KAKAO_REST_API_KEY")
 KAKAO_HEADERS = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
 KAKAO_KW_URL  = "https://dapi.kakao.com/v2/local/search/keyword.json"
@@ -30,9 +43,9 @@ def _get_client():
     global _client
     if _client is None:
         from openai import OpenAI
-
-        _client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        _client = wrap_openai(OpenAI(api_key=os.getenv("OPENAI_API_KEY")))
     return _client
+
 
 # AT4: 관광명소, CT1: 문화시설
 KAKAO_TOURIST_CATEGORIES = ["AT4", "CT1"]
@@ -124,8 +137,36 @@ RANKING_SYSTEM_PROMPT = """
 - 선호 정보가 없으면 카테고리 다양성과 거리를 기준으로 순위를 매기세요
 """.strip()
 
+CURATION_SYSTEM_PROMPT = """
+당신은 한국 관광지 전문 큐레이터입니다.
+장소 정보를 바탕으로 SNS 카드형 큐레이션 콘텐츠를 작성하세요.
+인스타그램 @daytripkorea 스타일처럼 감성적이고 유익한 문체로 작성합니다.
+
+반드시 아래 형식의 JSON 객체만 반환하세요:
+{
+  "curations": [
+    {
+      "id": "장소 ID (입력값 그대로)",
+      "headline": "장소의 핵심을 담은 한 줄 제목 (15자 내외)",
+      "description": "장소의 역사적·문화적 맥락과 매력을 5문장으로 서술 (300자 내외)",
+      "highlights": "핵심 포인트 3가지를 해시태그로 작성 (예: #역사적명소 #야경맛집 #가족나들이)",
+      "visit_tip": "방문 시 꼭 알아야 할 팁 또는 추천 포인트 (1문장)",
+      "operate_time": "운영시간 (예: 09:00~18:00, 없으면 빈 문자열)"
+    }
+  ]
+}
+
+규칙:
+- curations 배열에 제공된 장소 목록의 ID를 빠짐없이 포함하세요
+- description은 단순 설명이 아닌 스토리텔링 방식으로 작성하세요
+- highlights는 실제 overview·카테고리·운영 정보에서 도출하세요 (정보가 없으면 카테고리 기반으로 작성)
+- visit_tip은 계절·시간·방문 방법 등 실용적인 내용을 담으세요
+- operate_time은 입력된 usetime 값을 그대로 사용하세요 (없으면 빈 문자열)
+""".strip()
+
 
 # ── LLM ① : 위치 + 취향 구조화 추출 ─────────────────────────────────────────
+@traceable(name="extract_intent")
 def extract_intent_llm(user_message: str) -> dict:
     response = _get_client().chat.completions.create(
         model="gpt-4o-mini",
@@ -140,11 +181,12 @@ def extract_intent_llm(user_message: str) -> dict:
 
 
 # ── LLM ② : 후보 장소 선별·재정렬 ───────────────────────────────────────────
+@traceable(name="rank_places")
 def rank_places_llm(places: list[dict], user_message: str,
                     preferences: list[str]) -> tuple[list[dict], str]:
     summaries = [
         {
-            "id": p["id"],
+            "id": str(p["id"]),
             "name": p["place_name"],
             "category": p.get("category_name", ""),
             "distance_km": p["distance_km"],
@@ -169,14 +211,43 @@ def rank_places_llm(places: list[dict], user_message: str,
     result = json.loads(response.choices[0].message.content)
     ranked_ids = result.get("ranked_ids", [])
     reason = result.get("reason", "")
-    id_to_place = {p["id"]: p for p in places}
+    id_to_place = {str(p["id"]): p for p in places}
     ranked = [id_to_place[rid] for rid in ranked_ids if rid in id_to_place]
     return ranked, reason
 
 
-# ── Haversine 거리 계산 (km) — apps.agents.utils 공유 함수 사용 ───────────────
-def _haversine(lat1, lon1, lat2, lon2):
-    return haversine_km(lat1, lon1, lat2, lon2)
+# ── LLM ③ : 큐레이션 카드 생성 ──────────────────────────────────────────────
+@traceable(name="curate_places")
+def curate_places_llm(places: list[dict], preferences: list[str]) -> dict[str, dict]:
+    summaries = [
+        {
+            "id": str(p.get("id", p.get("place_id", ""))),
+            "name": p["place_name"],
+            "category": p.get("category_name", ""),
+            "address": p.get("address", p.get("formatted_address", "")),
+            "overview": (p.get("overview") or "")[:300],
+            "usetime": p.get("usetime", ""),
+            "restdate": p.get("restdate", ""),
+            "distance_km": p.get("distance_km", ""),
+        }
+        for p in places
+    ]
+    user_content = (
+        f"사용자 취향: {preferences}\n\n"
+        f"장소 목록:\n{json.dumps(summaries, ensure_ascii=False, indent=2)}"
+    )
+    response = _get_client().chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": CURATION_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        temperature=0.4,
+        response_format={"type": "json_object"},
+    )
+    raw = json.loads(response.choices[0].message.content)
+    items = raw.get("curations", [])
+    return {str(item["id"]): item for item in items if "id" in item}
 
 
 # ── DB: 위치명으로 좌표 조회 ──────────────────────────────────────────────────
@@ -185,9 +256,9 @@ def get_location_from_db(location_name: str) -> dict:
     cursor = conn.cursor()
     cursor.execute(
         """
-        SELECT place_name, CAST(x AS REAL), CAST(y AS REAL), address_name
+        SELECT place_name, CAST(x AS REAL), CAST(y AS REAL), address
         FROM tourists
-        WHERE place_name LIKE ? AND x != '' AND y != ''
+        WHERE place_name LIKE ? AND x IS NOT NULL AND x != '' AND y IS NOT NULL AND y != ''
         LIMIT 1
         """,
         (f"%{location_name}%",),
@@ -203,12 +274,13 @@ def get_location_from_db(location_name: str) -> dict:
     return {"found": False}
 
 
-# ── DB: 좌표 기반 주변 관광지 조회 ───────────────────────────────────────────
+# ── DB: 좌표 기반 주변 관광지 조회 (source='korea' 우선) ──────────────────────
 def search_nearby_from_db(latitude: float, longitude: float,
                           radius_km: float = 3.0, limit: int = 20,
                           preferences: list[str] | None = None) -> list[dict]:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+
     deg_lat = radius_km / 111.0
     deg_lon = radius_km / (111.0 * math.cos(math.radians(latitude)))
 
@@ -222,16 +294,24 @@ def search_nearby_from_db(latitude: float, longitude: float,
             pref_params.append(f"%{kw}%")
         pref_sql = f"AND ({' OR '.join(clauses)})"
 
+    # place_name별로 source='korea' 우선, 없으면 kakao 1행만 선택
     cursor.execute(
         f"""
-        SELECT * FROM tourists
-        WHERE CAST(x AS REAL) BETWEEN ? AND ?
-          AND CAST(y AS REAL) BETWEEN ? AND ?
-          AND x != '' AND y != ''
-          {pref_sql}
+        SELECT * FROM (
+            SELECT *,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY place_name
+                       ORDER BY CASE source WHEN 'korea' THEN 1 ELSE 2 END
+                   ) AS _rn
+            FROM tourists
+            WHERE CAST(x AS REAL) BETWEEN ? AND ?
+              AND CAST(y AS REAL) BETWEEN ? AND ?
+              AND x IS NOT NULL AND x != '' AND y IS NOT NULL AND y != ''
+              {pref_sql}
+        ) WHERE _rn = 1
         """,
         [longitude - deg_lon, longitude + deg_lon,
-         latitude - deg_lat, latitude + deg_lat] + pref_params,
+         latitude - deg_lat,  latitude + deg_lat] + pref_params,
     )
     columns = [desc[0] for desc in cursor.description]
     rows = cursor.fetchall()
@@ -240,7 +320,8 @@ def search_nearby_from_db(latitude: float, longitude: float,
     results = []
     for row in rows:
         record = dict(zip(columns, row))
-        dist = _haversine(latitude, longitude, float(record["y"]), float(record["x"]))
+        record.pop("_rn", None)
+        dist = haversine_km(latitude, longitude, float(record["y"]), float(record["x"]))
         if dist <= radius_km:
             record["distance_km"] = round(dist, 2)
             results.append(record)
@@ -249,20 +330,54 @@ def search_nearby_from_db(latitude: float, longitude: float,
     return results[:limit]
 
 
+# ── DB: source='korea' 데이터로 이미지·usetime 보강 ──────────────────────────
+def enrich_korea_images(places: list[dict]) -> list[dict]:
+    """kakao 행에 대해 source='korea' 행의 firstimage·firstimage2·usetime을 보강한다."""
+    names = [p["place_name"] for p in places if p.get("source") != "korea"]
+    if not names:
+        return places
+
+    conn = sqlite3.connect(DB_PATH)
+    placeholders = ",".join("?" * len(names))
+    rows = conn.execute(
+        f"""
+        SELECT place_name, firstimage, firstimage2, usetime
+        FROM tourists
+        WHERE source = 'korea'
+          AND place_name IN ({placeholders})
+        """,
+        names,
+    ).fetchall()
+    conn.close()
+
+    korea_data = {r[0]: {"firstimage": r[1], "firstimage2": r[2], "usetime": r[3]} for r in rows}
+    for place in places:
+        if place.get("source") == "korea":
+            continue
+        korea = korea_data.get(place["place_name"])
+        if not korea:
+            continue
+        if korea.get("firstimage") and not place.get("firstimage"):
+            place["firstimage"] = korea["firstimage"]
+            place["firstimage2"] = korea["firstimage2"]
+        if korea.get("usetime") and not place.get("usetime"):
+            place["usetime"] = korea["usetime"]
+    return places
+
+
+# ── DB: 대표 관광지 조회 (좌표 없는 일반 탐색용) ─────────────────────────────
 def search_representative_from_db(
     area: str = "서울",
     preferences: list[str] | None = None,
     limit: int = 20,
 ) -> list[dict]:
-    """Return broad, non-distance tourist picks for pre-trip exploration."""
-
     area_aliases = GENERAL_AREA_HINTS.get(area, (area,))
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    area_clauses = []
-    params: list[str] = []
+
+    area_clauses, params = [], []
     for alias in area_aliases:
-        area_clauses.extend(["area LIKE ?", "address_name LIKE ?", "road_address_name LIKE ?"])
+        area_clauses.extend(["area LIKE ?", "address LIKE ?", "road_address LIKE ?"])
         params.extend([f"%{alias}%", f"%{alias}%", f"%{alias}%"])
 
     pref_sql, pref_params = "", []
@@ -278,10 +393,8 @@ def search_representative_from_db(
     cursor.execute(
         f"""
         SELECT * FROM tourists
-        WHERE place_name IS NOT NULL
-          AND place_name != ''
-          AND x != ''
-          AND y != ''
+        WHERE place_name IS NOT NULL AND place_name != ''
+          AND x IS NOT NULL AND x != '' AND y IS NOT NULL AND y != ''
           AND ({' OR '.join(area_clauses)})
           {pref_sql}
         """,
@@ -293,20 +406,18 @@ def search_representative_from_db(
 
     ranked = []
     for row in rows:
-        name = row.get("place_name") or ""
-        if not name:
+        if not row.get("place_name"):
             continue
         score = _representative_score(row)
         ranked.append((score, {**row, "distance_km": None}))
 
     ranked.sort(key=lambda item: item[0], reverse=True)
-    deduped = []
-    seen: set[str] = set()
+    deduped, seen = [], set()
     for _, row in ranked:
-        canonical_name = _canonical_representative_name(row.get("place_name") or "")
-        if canonical_name in seen:
+        canonical = _canonical_representative_name(row.get("place_name") or "")
+        if canonical in seen:
             continue
-        seen.add(canonical_name)
+        seen.add(canonical)
         deduped.append(row)
         if len(deduped) >= limit:
             break
@@ -316,8 +427,7 @@ def search_representative_from_db(
 def _representative_score(row: dict) -> int:
     name = row.get("place_name") or ""
     category = row.get("category_name") or ""
-    score = 0
-    must_score = 0
+    score, must_score = 0, 0
     for index, must_name in enumerate(GENERAL_MUST_VISIT_PLACES):
         if name == must_name:
             must_score = max(must_score, 200 - index)
@@ -399,8 +509,8 @@ def search_nearby_from_kakao(latitude: float, longitude: float,
                 "id": pid, "source": "kakao_api",
                 "place_name": doc.get("place_name", ""),
                 "phone": doc.get("phone", ""),
-                "address_name": doc.get("address_name", ""),
-                "road_address_name": doc.get("road_address_name", ""),
+                "address": doc.get("address_name", ""),
+                "road_address": doc.get("road_address_name", ""),
                 "x": doc.get("x", ""), "y": doc.get("y", ""),
                 "category_name": doc.get("category_name", ""),
                 "category_group_code": doc.get("category_group_code", ""),
@@ -415,13 +525,12 @@ def search_nearby_from_kakao(latitude: float, longitude: float,
     return results[:limit]
 
 
+# ── 온보딩: 음악 키워드 기반 관광지 추천 ────────────────────────────────────
 def recommend_places_for_music_keywords(
     tracks: list[dict],
     per_keyword: int = 3,
     fixed_count: int = 2,
 ) -> dict:
-    """Select onboarding tourist places from the tourism DB for selected music vibes."""
-
     rows = _load_onboarding_tour_rows()
     used_names: set[str] = set()
     places: list[dict] = []
@@ -464,13 +573,11 @@ def _load_onboarding_tour_rows() -> list[dict]:
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         """
-        SELECT id, place_name, category_name, area, address_name, road_address_name,
+        SELECT id, place_name, category_name, area, address, road_address,
                x, y, firstimage, firstimage2, place_url, source
         FROM tourists
-        WHERE place_name IS NOT NULL
-          AND place_name != ''
-          AND x != ''
-          AND y != ''
+        WHERE place_name IS NOT NULL AND place_name != ''
+          AND x IS NOT NULL AND x != '' AND y IS NOT NULL AND y != ''
         """
     ).fetchall()
     conn.close()
@@ -511,8 +618,7 @@ def _best_row_for_terms(rows: list[dict], terms: list[str], used_names: set[str]
 
 def _best_fixed_row(rows: list[dict], fixed_name: str, used_names: set[str]) -> dict | None:
     exact = [
-        row
-        for row in rows
+        row for row in rows
         if row.get("place_name") == fixed_name and row.get("place_name") not in used_names
     ]
     if exact:
@@ -529,7 +635,7 @@ def _rank_rows_for_terms(rows: list[dict], terms: list[str], used_names: set[str
             continue
         haystack = " ".join(
             str(row.get(key) or "")
-            for key in ("place_name", "category_name", "address_name", "road_address_name", "area")
+            for key in ("place_name", "category_name", "address", "road_address", "area")
         )
         score = 0
         for term in terms:
@@ -557,7 +663,7 @@ def _onboarding_place_from_row(
     reason: str,
 ) -> dict:
     name = row.get("place_name") or "추천 장소"
-    address = row.get("road_address_name") or row.get("address_name") or ""
+    address = row.get("road_address") or row.get("address") or ""
     photo_urls = [url for url in (row.get("firstimage"), row.get("firstimage2")) if url]
     if category == "must":
         curation = f"{_topic_label(name)} {reason}"
@@ -626,8 +732,7 @@ def _general_tour_response(
     )
     return {
         "current_location": area or "서울",
-        "latitude": None,
-        "longitude": None,
+        "latitude": None, "longitude": None,
         "address": area or "서울",
         "data_source": "db_general",
         "preferences": preferences,
@@ -639,11 +744,10 @@ def _general_tour_response(
 
 
 # ── Agent 진입점 ──────────────────────────────────────────────────────────────
+@traceable(name="tourism_agent_run")
 def run(user_message: str, radius_km: float = 3.0) -> dict:
-    """
-    Tour agent entry node.
-    Returns a dict with current_location, recommended_places, data_source, etc.
-    """
+    """Tour agent entry node. Returns a dict with recommended_places + curation."""
+
     # Step 1: LLM — 위치 + 취향 추출
     intent = extract_intent_llm(user_message)
     location_name     = intent.get("location", "").strip()
@@ -680,12 +784,38 @@ def run(user_message: str, radius_km: float = 3.0) -> dict:
         candidates = search_nearby_from_kakao(lat, lon, radius_km=radius_km)
 
     candidates = [p for p in candidates if p["place_name"] != coord["place_name"]]
+    candidates = enrich_korea_images(candidates)
 
     # Step 5: LLM — 최적 장소 선별
     if candidates:
         ranked, reason = rank_places_llm(candidates, user_message, preferences)
     else:
         ranked, reason = [], "후보 없음"
+
+    # Step 6: LLM — 큐레이션 카드 생성
+    curation_map: dict[str, dict] = {}
+    if ranked:
+        try:
+            curation_map = curate_places_llm(ranked, preferences)
+        except Exception:
+            pass
+
+    for place in ranked:
+        pid = str(place.get("id", place.get("place_id", "")))
+        curation = curation_map.get(pid, {
+            "headline": place["place_name"],
+            "description": (place.get("overview") or "")[:150],
+            "highlights": [],
+            "visit_tip": "",
+        })
+        # DB usetime → operate_time 직접 반영
+        if place.get("usetime"):
+            curation["operate_time"] = place["usetime"]
+        if place.get("firstimage"):
+            curation["image_url"] = place["firstimage"]
+        if place.get("firstimage2"):
+            curation["image_url_2"] = place["firstimage2"]
+        place["curation"] = curation
 
     return {
         "current_location": coord["place_name"],
@@ -697,3 +827,27 @@ def run(user_message: str, radius_km: float = 3.0) -> dict:
         "llm_selection_reason": reason,
         "recommended_places": ranked,
     }
+
+
+def run_tour_agent_for_state(state: KDiveState, radius_km: float = 3.0) -> KDiveState:
+    """Supervisor가 tourist로 라우팅했을 때 KDiveState를 받아 tour agent를 실행한다."""
+    if AGENT_TOURIST not in (state.get("target_agents") or []):
+        return state
+
+    # travel_phase에 따라 검색 반경 조정
+    # - during_trip : 지금 이동 중 → 가까운 곳 위주 (1.5km)
+    # - pre_trip    : 여행 계획 중 → 더 넓은 범위 탐색 (5.0km)
+    # - unknown     : 기본값 유지 (3.0km)
+    travel_phase = state.get("travel_phase", "unknown")
+    if travel_phase == "during_trip":
+        radius_km = 1.5
+    elif travel_phase == "pre_trip":
+        radius_km = 5.0
+
+    agent_contexts = state.get("agent_taste_contexts") or {}
+    taste = agent_contexts.get(AGENT_TOURIST) or state.get("taste_context") or {}
+    location_keywords = taste.get("location_keywords") or []
+    user_message = location_keywords[0] if location_keywords else state["user_utterance"]
+
+    state["tourist_result"] = run(user_message=user_message, radius_km=radius_km)
+    return state

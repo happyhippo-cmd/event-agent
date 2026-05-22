@@ -36,6 +36,37 @@ CHAIN_BRANDS = (
 )
 LOCAL_INTENT_TERMS = ("로컬", "동네", "개인", "독립", "숨은", "체인", "프랜차이즈", "말고")
 
+# 구어체 동네명 → 공식 주소 키워드 매핑
+# 카카오 API 주소는 "마포구 서교동" 등 행정 주소를 사용하므로
+# "홍대"처럼 공식 주소에 없는 동네명은 이 매핑으로 확장해야 location 필터를 통과함
+NEIGHBORHOOD_ALIASES: dict[str, tuple[str, ...]] = {
+    "홍대":    ("마포구", "서교동", "합정동", "상수동", "홍익"),
+    "합정":    ("마포구", "합정동"),
+    "상수":    ("마포구", "상수동"),
+    "망원":    ("마포구", "망원동"),
+    "연남":    ("마포구", "연남동"),
+    "연남동":  ("마포구", "연남동"),
+    "이태원":  ("이태원동",),
+    "경리단길": ("이태원동",),
+    "해방촌":  ("후암동",),
+    "한남":    ("한남동",),
+    "북촌":    ("종로구", "가회동", "삼청동"),
+    "삼청동":  ("종로구", "삼청동"),
+    "익선동":  ("종로구", "익선동"),
+    "인사동":  ("종로구", "인사동"),
+    "서촌":    ("종로구", "체부동", "통의동", "효자동"),
+    "혜화":    ("종로구", "혜화동"),
+    "성수":    ("성동구", "성수동"),
+    "강남":    ("강남구",),
+    "신사동":  ("강남구", "신사동"),
+    "가로수길": ("강남구", "신사동"),
+    "압구정":  ("강남구", "압구정동"),
+    "청담":    ("강남구", "청담동"),
+    "을지로":  ("중구", "을지로"),
+    "신촌":    ("서대문구", "신촌동"),
+    "연희동":  ("서대문구", "연희동"),
+}
+
 FOOD_CATEGORY_GROUPS = {
     "카페": ("카페", "커피", "커피전문점", "디저트", "브런치", "베이커리", "북카페", "찻집"),
     "한식": ("한식", "백반", "국밥", "찌개", "고기", "육류"),
@@ -46,7 +77,7 @@ FOOD_CATEGORY_GROUPS = {
 }
 MOOD_KEYWORD_GROUPS = {
     "조용한": ("조용", "차분", "한적", "고요"),
-    "감성적인": ("감성", "분위기"),
+    "감성적인": ("감성", "분위기", "힙", "아늑", "포근"),
     "모던한": ("모던", "세련"),
     "활기찬": ("활기", "신나는", "북적"),
 }
@@ -116,21 +147,18 @@ def run_restaurant_agent(
     required_moods = _required_moods(taste_context)
     exclude_chains = _wants_non_chain(taste_context)
 
+    _vector_error: str | None = None
+    rows: list[dict[str, Any]] = []
     try:
         from .vector_store import query_places
 
         rows = query_places(query=query, top_k=max(top_k * 80, 240) + len(suppressed))
     except Exception as exc:
-        result = RestaurantAgentResult(
-            status="error",
-            query=query,
-            message=(
-                "restaurant vector search failed. "
-                "Run `python -m apps.agents.workers.restaurant.build_vector_db` "
-                f"from surfy-backend first. Detail: {exc}"
-            ),
+        _vector_error = (
+            "restaurant vector search failed. "
+            "Run `python -m apps.agents.workers.restaurant.build_vector_db` "
+            f"from surfy-backend first. Detail: {exc}"
         )
-        return result.model_dump()
 
     preferred_rows = [row for row in rows if _matches_location(row, location_keywords)]
     preferred_ids = {row.get("kakao_place_id") for row in preferred_rows}
@@ -160,6 +188,36 @@ def run_restaurant_agent(
         if len(candidates) >= top_k:
             break
 
+    # ── SQLite location fallback ─────────────────────────────────────────────
+    # 벡터 검색(local_hash + mood-only)은 위치명으로 장소를 찾지 못하므로,
+    # location_keywords가 있는데 후보가 0개이면 SQLite에서 직접 주소 필터링한다.
+    if not candidates and location_keywords:
+        sqlite_rows = _query_places_by_location_sqlite(
+            location_keywords=location_keywords,
+            requested_categories=requested_categories,
+            limit=max(top_k * 30, 90),
+        )
+        for row in sqlite_rows:
+            if _is_unavailable_place(row):
+                continue
+            if exclude_chains and _is_chain_place(row):
+                continue
+            if required_moods and not _matches_required_moods(row, required_moods):
+                continue
+            if _matches_suppressed(row, suppressed):
+                continue
+            candidates.append(_candidate_from_row(row, taste_context))
+            if len(candidates) >= top_k:
+                break
+
+    # 벡터 검색 자체가 실패했고, SQLite fallback으로도 후보가 없으면 error 반환
+    if not candidates and _vector_error and not location_keywords:
+        return RestaurantAgentResult(
+            status="error",
+            query=query,
+            message=_vector_error,
+        ).model_dump()
+
     status = "ok" if candidates else "no_results"
     message = "" if candidates else "명시 조건에 맞는 enriched place 후보를 찾지 못했습니다."
     candidates = _apply_llm_curations(candidates, taste_context, query)
@@ -178,8 +236,17 @@ def run_restaurant_agent_for_state(state: KDiveState, top_k: int = DEFAULT_TOP_K
     if AGENT_RESTAURANT not in target_agents and AGENT_FOODIE not in target_agents:
         return state
 
+    # travel_phase에 따라 추천 결과 수 조정
+    # - during_trip : 지금 당장 선택해야 하므로 핵심 3개만 (기본값 유지)
+    # - pre_trip    : 계획 단계라 비교 선택지 여유있게 5개
+    # - unknown     : 기본값 유지
+    travel_phase = state.get("travel_phase", "unknown")
+    if travel_phase == "pre_trip":
+        top_k = 5
+
+    agent_contexts = state.get("agent_taste_contexts") or {}
     result = run_restaurant_agent(
-        taste_context=state.get("taste_context", {}),
+        taste_context=agent_contexts.get(AGENT_FOODIE) or state.get("taste_context", {}),
         top_k=top_k,
     )
     state["restaurant_result"] = result
@@ -431,6 +498,83 @@ def _load_food_rows() -> list[dict[str, Any]]:
         category_name = data.pop("category_name") or ""
         data["category_full"] = category_name
         data["category"] = category_name.split(" > ")[-1]
+        result.append(data)
+    return result
+
+
+def _query_places_by_location_sqlite(
+    location_keywords: list[str],
+    requested_categories: list[str],
+    limit: int = 240,
+) -> list[dict[str, Any]]:
+    """SQLite에서 location 키워드로 직접 필터링해 rows를 반환한다.
+
+    벡터 검색(local_hash + mood-only embedding)이 위치명 기반 검색을 지원하지 못할 때
+    fallback으로 사용한다. NEIGHBORHOOD_ALIASES로 구어체 동네명을 행정 주소 키워드로 확장.
+    """
+    if not ENRICHED_DB_PATH.exists():
+        return []
+
+    # 구어체 동네명 → 행정 주소 키워드 확장
+    expanded: list[str] = []
+    for kw in location_keywords:
+        expanded.append(kw)
+        expanded.extend(NEIGHBORHOOD_ALIASES.get(kw, ()))
+    expanded = list(dict.fromkeys(kw for kw in expanded if kw))
+
+    # 카테고리 필터 키워드 (requested_categories → FOOD_CATEGORY_GROUPS 확장)
+    cat_keywords: list[str] = []
+    for cat in requested_categories:
+        cat_keywords.extend(FOOD_CATEGORY_GROUPS.get(cat, (cat,)))
+    cat_keywords = list(dict.fromkeys(cat_keywords))
+
+    try:
+        conn = sqlite3.connect(ENRICHED_DB_PATH)
+        conn.row_factory = sqlite3.Row
+
+        # 주소 LIKE 조건 (expanded 중 하나라도 포함)
+        # gu 필드는 데이터 품질 이슈가 있어 road_address/address 필드만 사용
+        loc_clauses = " OR ".join(
+            ["COALESCE(road_address, address) LIKE ?"] * len(expanded)
+        )
+        loc_params: list[str] = [f"%{kw}%" for kw in expanded]
+
+        # 카테고리 조건 (optional)
+        if cat_keywords:
+            cat_clauses = " OR ".join(["category_name LIKE ?"] * len(cat_keywords))
+            cat_params = [f"%{kw}%" for kw in cat_keywords]
+            where = f"({loc_clauses}) AND ({cat_clauses})"
+            params = loc_params + cat_params
+        else:
+            where = f"({loc_clauses})"
+            params = loc_params
+
+        sql = f"""
+            SELECT kakao_place_id, name, category_name, gu,
+                   COALESCE(road_address, address) AS address,
+                   lat, lng, rating, review_count, price_level,
+                   COALESCE(mood_tags_naver, mood_tags) AS mood_tags,
+                   michelin_stars, is_bib_gourmand
+            FROM enriched_places
+            WHERE {where}
+              AND lat IS NOT NULL AND lng IS NOT NULL
+            ORDER BY COALESCE(rating, 0) DESC, COALESCE(review_count, 0) DESC
+            LIMIT ?
+        """
+        rows = conn.execute(sql, params + [limit]).fetchall()
+        conn.close()
+    except Exception:
+        return []
+
+    result = []
+    for row in rows:
+        data = dict(row)
+        category_name = data.pop("category_name") or ""
+        data["category_full"] = category_name
+        data["category"] = category_name.split(" > ")[-1]
+        data["document"] = ""          # vector_store document 필드 호환
+        data["distance"] = 0.0
+        data["similarity_score"] = 0.0
         result.append(data)
     return result
 
@@ -828,7 +972,19 @@ def _required_moods(taste_context: dict[str, Any]) -> list[str]:
 
 
 def _matches_required_moods(row: dict[str, Any], required_moods: list[str]) -> bool:
+    """
+    required_moods 분위기와 row가 맞는지 확인한다.
+
+    소프트 필터 정책:
+    - mood_tags가 비어있는 row는 분위기 데이터가 없는 것으로 보고 통과시킨다
+      (데이터 미비로 좋은 장소를 과도하게 걸러내지 않기 위함).
+    - mood_tags가 있고 document에 관련 키워드가 전혀 없을 때만 탈락.
+    """
     mood_tags = _parse_mood_tags(row.get("mood_tags"))
+    # mood_tags 미존재 → 분위기 데이터 없음, 하드 필터 미적용
+    if not mood_tags:
+        return True
+
     haystack = " ".join(
         [
             str(row.get("document", "")),
@@ -900,8 +1056,21 @@ def _matches_suppressed(row: dict[str, Any], suppressed: set[str]) -> bool:
 
 
 def _matches_location(row: dict[str, Any], location_keywords: list[str]) -> bool:
+    """
+    location_keywords 중 하나라도 row의 이름·지역·주소에 포함되면 True.
+
+    구어체 동네명("홍대", "성수" 등)은 공식 주소에 없으므로
+    NEIGHBORHOOD_ALIASES로 행정 주소 키워드까지 확장해서 매칭한다.
+    """
     if not location_keywords:
         return False
+
+    # 구어체 동네명 → 행정 주소 키워드로 확장
+    expanded: list[str] = []
+    for kw in location_keywords:
+        expanded.append(kw)
+        expanded.extend(NEIGHBORHOOD_ALIASES.get(kw, ()))
+
     haystack = " ".join(
         [
             str(row.get("name", "")),
@@ -909,7 +1078,7 @@ def _matches_location(row: dict[str, Any], location_keywords: list[str]) -> bool
             str(row.get("address", "")),
         ]
     )
-    return any(keyword and keyword in haystack for keyword in location_keywords)
+    return any(kw and kw in haystack for kw in expanded)
 
 
 def _is_unavailable_place(row: dict[str, Any]) -> bool:

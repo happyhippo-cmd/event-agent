@@ -8,7 +8,27 @@ from __future__ import annotations
 import math
 import os
 import re
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
+
+# ============================================================
+# 날짜/시간
+# ============================================================
+
+_SEOUL_TZ = ZoneInfo("Asia/Seoul")
+
+
+def get_seoul_now() -> datetime:
+    """Asia/Seoul 기준 현재 datetime을 반환한다."""
+    return datetime.now(_SEOUL_TZ)
+
+
+def get_seoul_date_str() -> str:
+    """Asia/Seoul 기준 현재 날짜를 'YYYY년 M월 D일' 형식의 문자열로 반환한다."""
+    now = get_seoul_now()
+    return f"{now.year}년 {now.month}월 {now.day}일"
+
 
 # ============================================================
 # 공유 상수

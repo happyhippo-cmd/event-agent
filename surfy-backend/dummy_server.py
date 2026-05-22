@@ -266,6 +266,7 @@ def run_chat_pipeline(payload):
             recommendations.extend(_format_tour_recommendations(tour_result))
 
     if recommendations:
+        recommendations = recommendations[:3]
         base_response = _build_recommendation_response(
             recommendations,
             target_agents,
@@ -1059,9 +1060,9 @@ def _build_recommendation_response(recommendations, target_agents, taste_context
         return f"좋아요. Foodie, Culture Insider, Local Scout가 함께 고른 추천 {count}곳이에요: {names}"
     if has_restaurant and "event" in target_agents:
         return f"좋아요. Foodie와 Culture Insider가 맛집과 이벤트를 함께 골랐어요: {names}"
-    if "event" in target_agents and "tourist" in target_agents and not has_restaurant:
+    if "event" in target_agents and "tourist" in target_agents and "foodie" not in target_agents:
         return f"좋아요. 관광지와 전시·이벤트를 함께 골랐어요: {names}"
-    if "event" in target_agents and not has_restaurant and "tourist" not in target_agents:
+    if "event" in target_agents and "foodie" not in target_agents and "tourist" not in target_agents:
         return f"좋아요. 지금 요청에 맞는 이벤트 {count}곳을 골랐어요: {names}"
     if has_restaurant and "tourist" in target_agents:
         return f"좋아요. 맛집과 관광지를 함께 보고 어울리는 장소 {count}곳을 골랐어요: {names}"

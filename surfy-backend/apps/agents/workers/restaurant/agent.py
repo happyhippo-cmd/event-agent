@@ -236,6 +236,14 @@ def run_restaurant_agent_for_state(state: KDiveState, top_k: int = DEFAULT_TOP_K
     if AGENT_RESTAURANT not in target_agents and AGENT_FOODIE not in target_agents:
         return state
 
+    # travel_phase에 따라 추천 결과 수 조정
+    # - during_trip : 지금 당장 선택해야 하므로 핵심 3개만 (기본값 유지)
+    # - pre_trip    : 계획 단계라 비교 선택지 여유있게 5개
+    # - unknown     : 기본값 유지
+    travel_phase = state.get("travel_phase", "unknown")
+    if travel_phase == "pre_trip":
+        top_k = 5
+
     agent_contexts = state.get("agent_taste_contexts") or {}
     result = run_restaurant_agent(
         taste_context=agent_contexts.get(AGENT_FOODIE) or state.get("taste_context", {}),

@@ -35,7 +35,7 @@ export default function Nav() {
             <button type="button" className="bg-transparent border-0 text-inherit cursor-default">
               Log
             </button>
-            <button type="button" className="bg-transparent border-0 text-inherit cursor-default">
+            <button type="button" data-nav-target="mypage" onClick={() => showAppPage('mypage')} className={appLinkClass('mypage')}>
               My page
             </button>
           </>

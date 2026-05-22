@@ -22,18 +22,18 @@ function useFoamCanvas(canvasRef) {
 
     const mkP = (w, h) => ({
       x:    Math.random() * w,
-      y:    h * 0.58 + Math.random() * h * 0.42,
-      r:    0.7 + Math.random() * 3.2,
-      op:   0.2  + Math.random() * 0.5,
-      vx:   (Math.random() - 0.5) * 0.5,
-      vy:   -0.1 - Math.random() * 0.6,
+      y:    h * 0.6 + Math.random() * h * 0.4,
+      r:    0.7 + Math.random() * 3,
+      op:   0.3 + Math.random() * 0.55,
+      vx:   (Math.random() - 0.5) * 0.45,
+      vy:   -0.1 - Math.random() * 0.55,
       life: 0,
       max:  80 + Math.random() * 120,
     });
 
     const W = () => canvas.width;
     const H = () => canvas.height;
-    const particles = Array.from({ length: 85 }, () => {
+    const particles = Array.from({ length: 90 }, () => {
       const p = mkP(canvas.width, canvas.height);
       p.life = Math.random() * p.max;
       return p;
@@ -77,6 +77,35 @@ const SHIMMERS = [
 ];
 
 /* ─────────────────────────────────────────────
+   파도 path 정의 (in-place 모핑용)
+   viewBox = 0 0 1440 200
+   각 레이어 두 상태: crest(마루) ↔ trough(골)
+───────────────────────────────────────────── */
+// Layer 1 — 배경 (H=135, A=30)
+const P1C = 'M0,135 C180,105 540,165 720,135 C900,105 1260,165 1440,135 L1440,200 L0,200 Z';
+const P1T = 'M0,135 C180,165 540,105 720,135 C900,165 1260,105 1440,135 L1440,200 L0,200 Z';
+const L1C = 'M0,135 C180,105 540,165 720,135 C900,105 1260,165 1440,135';
+const L1T = 'M0,135 C180,165 540,105 720,135 C900,165 1260,105 1440,135';
+
+// Layer 2 — 중간 (H=110, A=28)
+const P2C = 'M0,110 C180,82 540,138 720,110 C900,82 1260,138 1440,110 L1440,200 L0,200 Z';
+const P2T = 'M0,110 C180,138 540,82 720,110 C900,138 1260,82 1440,110 L1440,200 L0,200 Z';
+const L2C = 'M0,110 C180,82 540,138 720,110 C900,82 1260,138 1440,110';
+const L2T = 'M0,110 C180,138 540,82 720,110 C900,138 1260,82 1440,110';
+
+// Layer 3 — 앞면 크레스트 (H=82, A=26)
+const P3C = 'M0,82 C180,56 540,108 720,82 C900,56 1260,108 1440,82 L1440,200 L0,200 Z';
+const P3T = 'M0,82 C180,108 540,56 720,82 C900,108 1260,56 1440,82 L1440,200 L0,200 Z';
+const L3C = 'M0,82 C180,56 540,108 720,82 C900,56 1260,108 1440,82';
+const L3T = 'M0,82 C180,108 540,56 720,82 C900,108 1260,56 1440,82';
+
+// Layer 4 — 최전면 거품 (H=148, A=18)
+const P4C = 'M0,148 C180,130 540,166 720,148 C900,130 1260,166 1440,148 L1440,200 L0,200 Z';
+const P4T = 'M0,148 C180,166 540,130 720,148 C900,166 1260,130 1440,148 L1440,200 L0,200 Z';
+const L4C = 'M0,148 C180,130 540,166 720,148 C900,130 1260,166 1440,148';
+const L4T = 'M0,148 C180,166 540,130 720,148 C900,166 1260,130 1440,148';
+
+/* ─────────────────────────────────────────────
    메인 컴포넌트
 ───────────────────────────────────────────── */
 export default function SplashPage() {
@@ -99,13 +128,38 @@ export default function SplashPage() {
   return (
     <>
       <style>{`
-        @keyframes kd-wave-c {
-          from { transform: translateX(-5%); }
-          to   { transform: translateX(-55%); }
+        /* ── 제자리 출렁임: translateX 없이 path d값만 모핑 ── */
+        @keyframes kd-r1 {
+          0%,100% { d: path("${P1C}"); }
+          50%      { d: path("${P1T}"); }
         }
-        @keyframes kd-wave-d {
-          from { transform: translateX(-22%); }
-          to   { transform: translateX(-72%); }
+        @keyframes kd-r1l {
+          0%,100% { d: path("${L1C}"); }
+          50%      { d: path("${L1T}"); }
+        }
+        @keyframes kd-r2 {
+          0%,100% { d: path("${P2C}"); }
+          50%      { d: path("${P2T}"); }
+        }
+        @keyframes kd-r2l {
+          0%,100% { d: path("${L2C}"); }
+          50%      { d: path("${L2T}"); }
+        }
+        @keyframes kd-r3 {
+          0%,100% { d: path("${P3C}"); }
+          50%      { d: path("${P3T}"); }
+        }
+        @keyframes kd-r3l {
+          0%,100% { d: path("${L3C}"); }
+          50%      { d: path("${L3T}"); }
+        }
+        @keyframes kd-r4 {
+          0%,100% { d: path("${P4C}"); }
+          50%      { d: path("${P4T}"); }
+        }
+        @keyframes kd-r4l {
+          0%,100% { d: path("${L4C}"); }
+          50%      { d: path("${L4T}"); }
         }
         @keyframes kd-fade-up {
           from { opacity: 0; transform: translateY(22px); }
@@ -126,168 +180,201 @@ export default function SplashPage() {
         className="relative w-full overflow-hidden"
         style={{ height: '100svh' }}
       >
-        {/* ─────────────────────────────────────
-            레이어 0: CSS 폴백 배경
-            (비디오 로드 전 / 파일 없을 때 표시)
-        ───────────────────────────────────── */}
+        {/* ── 레이어 0: CSS 폴백 배경 ── */}
         <div
           className="absolute inset-0"
           style={{
             background:
-              'linear-gradient(180deg, #6EC6F0 0%, #4AAEDC 18%, #2090C8 34%,' +
-              '#0A76AE 44%, #005A90 52%, #007EB5 62%, #00B8D8 78%, #70E4F0 92%, #C0F2FA 100%)',
+              'linear-gradient(180deg,#6EC6F0 0%,#4AAEDC 18%,#2090C8 34%,' +
+              '#0A76AE 44%,#005A90 52%,#007EB5 62%,#00B8D8 78%,#70E4F0 92%,#C0F2FA 100%)',
             zIndex: 0,
           }}
         />
 
-        {/* ─────────────────────────────────────
-            레이어 1: 실사 비디오 배경
-
-            📁 영상 위치: kdive-init/public/videos/ocean.mp4
-            🎬 무료 영상 다운로드:
-               https://mixkit.co/free-stock-video/ocean/
-               → "Waves Breaking on the Shore" 류 선택
-               → 1080p MP4 다운로드 후 ocean.mp4 로 저장
-        ───────────────────────────────────── */}
+        {/* ── 레이어 1: 실사 비디오 — filter 없음 (원본 컬러) ── */}
         <video
           autoPlay
           muted
           loop
           playsInline
           className="absolute inset-0 w-full h-full"
-          style={{
-            zIndex: 1,
-            objectFit: 'cover',
-            filter: 'brightness(0.88) saturate(1.15)',
-          }}
+          style={{ zIndex: 1, objectFit: 'cover' }}
         >
           <source src="/videos/ocean.mp4" type="video/mp4" />
-          {/* webm 포맷도 있다면 화질/용량 유리 */}
-          {/* <source src="/videos/ocean.webm" type="video/webm" /> */}
         </video>
 
-        {/* ─────────────────────────────────────
-            레이어 2: 텍스트 가독성 오버레이
-            (좌측 영역만 살짝 어둡게)
-        ───────────────────────────────────── */}
+        {/* ── 레이어 2: 텍스트 가독성 오버레이 (좌측만 살짝) ── */}
         <div
           className="absolute inset-0"
           style={{
             background:
-              'linear-gradient(108deg, rgba(0,18,65,0.55) 0%, rgba(0,18,65,0.28) 42%, transparent 72%)',
+              'linear-gradient(108deg,rgba(0,18,65,0.52) 0%,rgba(0,18,65,0.26) 42%,transparent 70%)',
             zIndex: 2,
           }}
         />
 
-        {/* ─────────────────────────────────────
-            레이어 3: 하단 파도 블렌딩 (영상 경계 자연스럽게)
-        ───────────────────────────────────── */}
+        {/* ── 레이어 3: 하단 블렌딩 ── */}
         <div
           className="absolute bottom-0 left-0 right-0 pointer-events-none"
           style={{
             height: '28%',
-            background: 'linear-gradient(to bottom, transparent, rgba(0,150,200,0.22))',
+            background: 'linear-gradient(to bottom,transparent,rgba(0,140,190,0.18))',
             zIndex: 3,
           }}
         />
 
-        {/* ─────────────────────────────────────
-            레이어 4: SVG 파도 2단 (하단 엣지)
-        ───────────────────────────────────── */}
+        {/* ── 레이어 4: 파도 4단 (제자리 출렁임) ── */}
         <div
           className="absolute pointer-events-none select-none"
-          style={{ bottom: 0, left: 0, right: 0, height: '26%', zIndex: 4 }}
+          style={{ bottom: 0, left: 0, right: 0, height: '45%', zIndex: 4 }}
         >
-          {/* 파도 A — 크레스트 */}
+          {/* 파도 1 — 배경 */}
           <svg
-            className="absolute bottom-0 left-0"
+            className="absolute bottom-0 left-0 w-full h-full"
+            viewBox="0 0 1440 200"
             preserveAspectRatio="none"
-            style={{ width: '200%', height: '100%', animation: 'kd-wave-c 7s linear infinite' }}
-            viewBox="0 0 2880 200"
             xmlns="http://www.w3.org/2000/svg"
           >
             <defs>
-              <linearGradient id="wgA" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%"   stopColor="rgba(255,255,255,0.38)" />
-                <stop offset="100%" stopColor="rgba(255,255,255,0.08)" />
+              <linearGradient id="g1" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%"   stopColor="#00A8D0" stopOpacity="0.88" />
+                <stop offset="100%" stopColor="#00C4E0" stopOpacity="1" />
               </linearGradient>
             </defs>
             <path
-              d="M0,100 C80,65 220,135 420,98 C600,64 800,132 1040,95
-                 C1240,62 1460,130 1680,96 C1880,63 2080,128 2320,94
-                 C2520,62 2720,130 2880,100 L2880,200 L0,200 Z"
-              fill="url(#wgA)"
+              style={{ animation: 'kd-r1 12s ease-in-out 0s infinite' }}
+              d={P1C}
+              fill="url(#g1)"
             />
             <path
-              d="M0,96 C80,61 220,131 420,94 C600,60 800,128 1040,91
-                 C1240,58 1460,126 1680,92 C1880,59 2080,124 2320,90
-                 C2520,58 2720,126 2880,96"
+              style={{ animation: 'kd-r1l 12s ease-in-out 0s infinite' }}
+              d={L1C}
               fill="none"
-              stroke="rgba(255,255,255,0.72)"
-              strokeWidth="10"
-              strokeLinecap="round"
-            />
-            <path
-              d="M0,96 C80,61 220,131 420,94 C600,60 800,128 1040,91
-                 C1240,58 1460,126 1680,92 C1880,59 2080,124 2320,90
-                 C2520,58 2720,126 2880,96"
-              fill="none"
-              stroke="rgba(255,255,255,0.18)"
-              strokeWidth="26"
+              stroke="rgba(255,255,255,0.55)"
+              strokeWidth="7"
               strokeLinecap="round"
             />
           </svg>
 
-          {/* 파도 B — 최전면 하얀 거품 */}
+          {/* 파도 2 — 중간 */}
           <svg
-            className="absolute bottom-0 left-0"
+            className="absolute bottom-0 left-0 w-full h-full"
+            viewBox="0 0 1440 200"
             preserveAspectRatio="none"
-            style={{ width: '200%', height: '100%', animation: 'kd-wave-d 4.2s linear infinite' }}
-            viewBox="0 0 2880 200"
             xmlns="http://www.w3.org/2000/svg"
           >
             <defs>
-              <linearGradient id="wgB" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%"   stopColor="rgba(255,255,255,0.58)" />
-                <stop offset="100%" stopColor="rgba(210,245,255,0.28)" />
+              <linearGradient id="g2" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%"   stopColor="#00C0DC" stopOpacity="0.92" />
+                <stop offset="100%" stopColor="#40D8EC" stopOpacity="1" />
               </linearGradient>
             </defs>
             <path
-              d="M0,140 C60,112 160,158 320,132 C480,108 660,154 860,126
-                 C1040,104 1240,152 1440,126 C1640,104 1820,150 2020,122
-                 C2220,100 2460,150 2660,124 C2780,108 2860,138 2880,132
-                 L2880,200 L0,200 Z"
-              fill="url(#wgB)"
+              style={{ animation: 'kd-r2 8.5s ease-in-out -3s infinite' }}
+              d={P2C}
+              fill="url(#g2)"
             />
             <path
-              d="M0,137 C60,109 160,155 320,129 C480,105 660,151 860,123
-                 C1040,101 1240,149 1440,123 C1640,101 1820,147 2020,119
-                 C2220,97 2460,147 2660,121 C2780,105 2860,135 2880,129"
+              style={{ animation: 'kd-r2l 8.5s ease-in-out -3s infinite' }}
+              d={L2C}
               fill="none"
-              stroke="rgba(255,255,255,0.95)"
+              stroke="rgba(255,255,255,0.72)"
+              strokeWidth="11"
+              strokeLinecap="round"
+            />
+            <path
+              style={{ animation: 'kd-r2l 8.5s ease-in-out -3s infinite' }}
+              d={L2C}
+              fill="none"
+              stroke="rgba(255,255,255,0.22)"
+              strokeWidth="24"
+              strokeLinecap="round"
+            />
+          </svg>
+
+          {/* 파도 3 — 앞면 크레스트 */}
+          <svg
+            className="absolute bottom-0 left-0 w-full h-full"
+            viewBox="0 0 1440 200"
+            preserveAspectRatio="none"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <defs>
+              <linearGradient id="g3" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%"   stopColor="rgba(255,255,255,0.94)" />
+                <stop offset="20%"  stopColor="#7EEAF6" />
+                <stop offset="100%" stopColor="#A0F0F8" />
+              </linearGradient>
+            </defs>
+            <path
+              style={{ animation: 'kd-r3 5.5s ease-in-out -1.5s infinite' }}
+              d={P3C}
+              fill="url(#g3)"
+            />
+            <path
+              style={{ animation: 'kd-r3l 5.5s ease-in-out -1.5s infinite' }}
+              d={L3C}
+              fill="none"
+              stroke="rgba(255,255,255,0.96)"
               strokeWidth="14"
               strokeLinecap="round"
             />
             <path
-              d="M0,137 C60,109 160,155 320,129 C480,105 660,151 860,123
-                 C1040,101 1240,149 1440,123 C1640,101 1820,147 2020,119
-                 C2220,97 2460,147 2660,121 C2780,105 2860,135 2880,129"
+              style={{ animation: 'kd-r3l 5.5s ease-in-out -1.5s infinite' }}
+              d={L3C}
               fill="none"
-              stroke="rgba(255,255,255,0.22)"
-              strokeWidth="36"
+              stroke="rgba(255,255,255,0.28)"
+              strokeWidth="32"
+              strokeLinecap="round"
+            />
+          </svg>
+
+          {/* 파도 4 — 최전면 거품 */}
+          <svg
+            className="absolute bottom-0 left-0 w-full h-full"
+            viewBox="0 0 1440 200"
+            preserveAspectRatio="none"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <defs>
+              <linearGradient id="g4" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%"   stopColor="rgba(255,255,255,0.98)" />
+                <stop offset="28%"  stopColor="rgba(208,246,255,0.94)" />
+                <stop offset="100%" stopColor="rgba(182,240,252,0.90)" />
+              </linearGradient>
+            </defs>
+            <path
+              style={{ animation: 'kd-r4 3.8s ease-in-out -4s infinite' }}
+              d={P4C}
+              fill="url(#g4)"
+            />
+            <path
+              style={{ animation: 'kd-r4l 3.8s ease-in-out -4s infinite' }}
+              d={L4C}
+              fill="none"
+              stroke="rgba(255,255,255,0.98)"
+              strokeWidth="16"
+              strokeLinecap="round"
+            />
+            <path
+              style={{ animation: 'kd-r4l 3.8s ease-in-out -4s infinite' }}
+              d={L4C}
+              fill="none"
+              stroke="rgba(255,255,255,0.28)"
+              strokeWidth="38"
               strokeLinecap="round"
             />
           </svg>
         </div>
 
-        {/* 레이어 5: Canvas 거품 파티클 */}
+        {/* ── 레이어 5: Canvas 거품 파티클 ── */}
         <canvas
           ref={canvasRef}
           className="absolute inset-0 w-full h-full pointer-events-none"
           style={{ zIndex: 5 }}
         />
 
-        {/* 레이어 6: 수면 반짝임 */}
+        {/* ── 레이어 6: 수면 반짝임 ── */}
         {SHIMMERS.map((s, i) => (
           <div
             key={i}
@@ -302,9 +389,7 @@ export default function SplashPage() {
           />
         ))}
 
-        {/* ─────────────────────────────────────
-            레이어 10: 텍스트 콘텐츠
-        ───────────────────────────────────── */}
+        {/* ── 레이어 10: 텍스트 ── */}
         <div
           className="relative flex flex-col justify-center px-[clamp(32px,10vw,120px)]"
           style={{ height: '52%', zIndex: 10 }}
@@ -314,10 +399,8 @@ export default function SplashPage() {
             style={{
               fontSize: 'clamp(3.8rem,9.5vw,8rem)',
               color: '#ffffff',
-              textShadow: '0 2px 28px rgba(0,20,80,0.55), 0 4px 64px rgba(0,10,50,0.3)',
-              animation: mounted
-                ? 'kd-fade-up 1s cubic-bezier(.22,1,.36,1) .15s both'
-                : 'none',
+              textShadow: '0 2px 28px rgba(0,20,80,0.55),0 4px 64px rgba(0,10,50,0.3)',
+              animation: mounted ? 'kd-fade-up 1s cubic-bezier(.22,1,.36,1) .15s both' : 'none',
               opacity: mounted ? undefined : 0,
             }}
           >
@@ -330,9 +413,7 @@ export default function SplashPage() {
               fontSize: 'clamp(.95rem,1.8vw,1.2rem)',
               color: 'rgba(255,255,255,0.95)',
               textShadow: '0 1px 12px rgba(0,20,80,0.5)',
-              animation: mounted
-                ? 'kd-fade-up 1s cubic-bezier(.22,1,.36,1) .65s both'
-                : 'none',
+              animation: mounted ? 'kd-fade-up 1s cubic-bezier(.22,1,.36,1) .65s both' : 'none',
               opacity: mounted ? undefined : 0,
             }}
           >
@@ -346,9 +427,7 @@ export default function SplashPage() {
               color: 'rgba(255,255,255,0.82)',
               maxWidth: 500,
               textShadow: '0 1px 8px rgba(0,15,70,0.4)',
-              animation: mounted
-                ? 'kd-fade-up 1s cubic-bezier(.22,1,.36,1) 1.05s both'
-                : 'none',
+              animation: mounted ? 'kd-fade-up 1s cubic-bezier(.22,1,.36,1) 1.05s both' : 'none',
               opacity: mounted ? undefined : 0,
             }}
           >
@@ -362,15 +441,13 @@ export default function SplashPage() {
             style={{
               width: 40, height: 3,
               background: 'rgba(255,255,255,0.6)',
-              animation: mounted
-                ? 'kd-fade-up 1s cubic-bezier(.22,1,.36,1) 1.35s both'
-                : 'none',
+              animation: mounted ? 'kd-fade-up 1s cubic-bezier(.22,1,.36,1) 1.35s both' : 'none',
               opacity: mounted ? undefined : 0,
             }}
           />
         </div>
 
-        {/* 스크롤 화살표 */}
+        {/* ── 스크롤 화살표 ── */}
         <button
           type="button"
           onClick={scrollDown}

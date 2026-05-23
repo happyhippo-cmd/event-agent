@@ -38,6 +38,7 @@ export default function HistoryPage() {
     toggleHistoryVisit,
     togglePendingUnlike,
     showAppPage,
+    appPhase,
   } = useKdive();
   const [activeTab, setActiveTab] = useState('all');
   const [expandedCurationKey, setExpandedCurationKey] = useState(null);
@@ -57,7 +58,7 @@ export default function HistoryPage() {
     [likedFoodKeys, likedFoodRecords, activeAlbum]
   );
 
-  if (!loggedIn || activeAppPage !== 'history') return null;
+  if (!loggedIn || appPhase !== 'app' || activeAppPage !== 'history') return null;
 
   const allSavedItems = [...places, ...foods];
   const visibleItems = (() => {

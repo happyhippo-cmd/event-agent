@@ -480,7 +480,8 @@ def _run_surfy_workers_node(state):
         )
 
     if AGENT_TOURIST in target_agents:
-        jobs.append((AGENT_TOURIST, _run_tour_agent, (user_message,), {}))
+        tourist_taste = _agent_taste_context(result_state, AGENT_TOURIST)
+        jobs.append((AGENT_TOURIST, _run_tour_agent, (user_message,), {"taste_context": tourist_taste}))
 
     if not jobs:
         return result_state
@@ -904,11 +905,12 @@ def _run_event_agent(user_message, taste_context=None, history=None):
         }
 
 
-def _run_tour_agent(user_message):
+def _run_tour_agent(user_message, taste_context=None):
     try:
-        from apps.agents.workers.tour.agent import run as run_tour_agent
+        from apps.agents.workers.tour.agent import run_agent
 
-        result = run_tour_agent(user_message, radius_km=3.0)
+        raw_json = run_agent(user_message, radius_km=3.0, taste_context=taste_context)
+        result = json.loads(raw_json)
     except Exception as exc:
         return {
             "status": "error",

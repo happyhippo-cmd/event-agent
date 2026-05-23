@@ -195,6 +195,92 @@ def run(query: str, **kwargs: Any) -> dict[str, Any]:
     return run_event_agent(query=query, **kwargs)
 
 
+def _curator_intro_with_llm(
+    query: str,
+    curated: list[dict[str, Any]],
+    relax_note: str = "",
+) -> str:
+    """큐레이터 노트 톤의 인트로를 LLM 한 번 호출로 생성한다.
+
+    카드 자체가 이미 reason을 들고 있으니, 인트로는 "이 셋을 왜 묶었는지"의
+    공통 근거(지역·라인업·결)만 짧게 적는다. 자랑·과장·빈말 금지.
+    실패 시 빈 문자열 반환 → 호출부에서 템플릿 폴백.
+    """
+    if not curated:
+        return ""
+    client = get_openai_client()
+    if client is None:
+        return ""
+
+    cards_brief = []
+    for idx, card in enumerate(curated[:3], 1):
+        cards_brief.append({
+            "index": idx,
+            "title": str(card.get("title") or ""),
+            "category": str(card.get("category") or ""),
+            "location": str(card.get("location") or card.get("region") or ""),
+            "reason": str(card.get("reason") or "")[:200],
+        })
+
+    system_msg = (
+        "너는 K-Dive의 이벤트 큐레이터다. 사용자에게 추천 카드 3장과 함께 보여줄 "
+        "인트로를 친근한 큐레이터 노트 톤으로 쓴다.\n\n"
+        "**4단 구조로 작성하라:**\n"
+        "1) **자신감 있는 한 줄 도입** — 큐레이터로서 이 장르/유형의 매력을 한 줄로 단정짓듯. "
+        "끝에 '!' 가능. 예: '인디밴드는 라이브로 들어야 진짜죠!', '성수 팝업은 컨셉이 반이에요.'\n"
+        "2) **선정 근거** — 왜 이 셋을 묶었는지. 공통점(단독 공연·지역·결·라인업)을 짚고, "
+        "굳이 뺀 것(합동 페스·브랜드 홍보용 등)이 있으면 함께 언급.\n"
+        "3) **결 차이** — 셋의 차이를 한 문장으로. '~의 ○○ 결, ~의 △△ 색' 같은 형식으로 "
+        "각 카드가 어떻게 다른지 짧게 짚어 사용자가 취향대로 고르게 함.\n"
+        "4) **후속 제안** — '보고 싶은 다른 ○○이 있다면 ~ 찾아드릴게요!' 형식의 친근한 마무리. "
+        "선택 폭을 열어두는 한 줄.\n\n"
+        "**톤 규칙:**\n"
+        "- **문장 종결은 '요체'**. '~죠', '~좋을 것 같아요', '~찾아드릴게요'.\n"
+        "  · 피할 예: '~합니다', '~입니다', '~했습니다' 같은 격식체.\n"
+        "- 친구가 자기 분야 얘기하듯 자연스럽게. 단 반말 금지.\n"
+        "- 자랑·과장·빈말 금지: '특별한 경험', '깊은 감동', '안성맞춤', '추천드립니다' 안 씀.\n"
+        "- 카드의 title/category/location/reason에 실제 있는 정보만 사용. 지어내기 금지.\n"
+        "- 단, 아티스트·브랜드의 장르적 결(어쿠스틱·밴드 사운드·보컬 중심 등)은 일반 지식으로 표현 가능.\n"
+        "- 전체 4문장 내외, 너무 길게 늘이지 말 것.\n\n"
+        "**참고 예시 (인디밴드 공연 3건 추천):**\n"
+        "인디밴드는 라이브로 들어야 진짜죠! 인디는 단독 무대일 때 밴드 색이 가장 잘 보여서, "
+        "합동 페스 빼고 셋 다 단독 공연으로 뽑았어요. 언텔의 어쿠스틱 결, 먼데이프로젝트의 "
+        "밴드 사운드, 아사달의 보컬 색이 각각 달라서 취향대로 한 곳 정해보셔도 좋을 것 같아요. "
+        "보고 싶은 다른 인디밴드가 있다면 공연일정을 찾아드릴게요!"
+    )
+
+    relax_hint = f"\n[안내] 일부 조건을 완화해서 골랐어요: {relax_note}" if relax_note else ""
+    user_msg = (
+        f"[사용자 요청] {query}{relax_hint}\n\n"
+        f"[고른 카드들]\n{json.dumps(cards_brief, ensure_ascii=False, indent=2)}\n\n"
+        "위 셋에 대한 인트로를 4단 구조(도입 → 선정 근거 → 결 차이 → 후속 제안)로 써. "
+        "참고 예시의 톤·길이를 그대로 따라가되, 라인업·지역·결은 이번 카드 내용에 맞게 바꿔."
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=os.getenv("EVENT_AGENT_MODEL", "gpt-4o-mini"),
+            temperature=0.4,
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+        )
+        text = (response.choices[0].message.content or "").strip()
+    except Exception:
+        return ""
+
+    text = " ".join(text.split())
+    for phrase in EMPTY_REASON_PHRASES:
+        if phrase in text:
+            return ""
+    # 톤 가드: '~습니다/입니다'가 2회 이상이면 격식체로 빠진 것 → 폴백
+    formal_count = text.count("습니다") + text.count("입니다")
+    if formal_count >= 2:
+        return ""
+    return text
+
+
 def _build_event_response_message(
     query: str,
     taste_context: dict[str, Any],
@@ -238,17 +324,27 @@ def _build_event_response_message(
     if not object_term:
         object_term = category_label or "이벤트"
 
+    # query에 명시적 장르/유형 단어가 있으면 mood modifier를 떼낸다.
+    # ("인디밴드 공연"에 "애틋한"이 잘못 붙는 충돌 방지)
+    explicit_genre_terms = (
+        "인디", "아이돌", "케이팝", "k-pop", "kpop", "재즈", "힙합", "랩",
+        "록", "락", "EDM", "edm", "트로트", "내한",
+    )
+    query_lower = query_text.lower()
+    has_explicit_genre = any(term.lower() in query_lower for term in explicit_genre_terms)
+
     modifiers = []
     if locations:
         modifiers.append(locations[0])
-    if "재미" in query_text:
-        modifiers.append("재미있는")
-    elif mood_terms:
-        modifiers.append(mood_terms[0])
-    elif "감성" in query_text:
-        modifiers.append("감성적인")
-    elif "조용" in query_text or "차분" in query_text:
-        modifiers.append("차분한")
+    if not has_explicit_genre:
+        if "재미" in query_text:
+            modifiers.append("재미있는")
+        elif mood_terms:
+            modifiers.append(mood_terms[0])
+        elif "감성" in query_text:
+            modifiers.append("감성적인")
+        elif "조용" in query_text or "차분" in query_text:
+            modifiers.append("차분한")
 
     request_label = " ".join([*modifiers, object_term]).strip() or "요청한 분위기"
 
@@ -256,19 +352,26 @@ def _build_event_response_message(
     if relax_note:
         return f"{relax_note} 이런 {object_term}들이 있더라구요."
 
-    detail = "후보 중 요청과 가장 가까운 곳만 추렸어요."
-    if "아이돌" in query_text or "케이팝" in query_text.lower() or "k-pop" in query_text.lower():
-        detail = "인디나 솔로 공연은 빼고 K-pop 아이돌 무대 중심으로 봤어요."
+    # 큐레이터 노트 톤: 자랑 없이 선정 근거 한 줄. 빈말 폴백("가장 가까운 곳만")은
+    # 정보가 0이라 제거. 단서가 있을 때만 detail을 붙이고, 없으면 인트로만.
+    detail = ""
+    if "아이돌" in query_text or "케이팝" in query_lower or "k-pop" in query_lower:
+        detail = "인디·솔로 라인은 빼고 K-pop 아이돌 단독 무대 위주로 봤어요."
+    elif "인디" in query_text:
+        detail = "메이저 라인업은 빼고 인디 신의 단독 무대 위주로 봤어요."
+    elif "재즈" in query_text:
+        detail = "재즈 라인업 중심으로 봤어요."
     elif suppressed:
-        detail = "말한 회피 조건은 빼고, 컨셉이나 체험 포인트가 보이는 후보로 추렸어요."
+        detail = "회피 조건은 빼고, 컨셉·체험 포인트가 뚜렷한 쪽을 우선했어요."
     elif locations:
         detail = f"{locations[0]} 안에서 실제로 갈 수 있는 후보만 남겼어요."
     elif "감성" in query_text:
-        detail = "요란한 체험형보다 천천히 머물기 좋은 쪽을 우선했어요."
+        detail = "체험형보다 천천히 머물기 좋은 쪽을 우선했어요."
     elif "팝업" in query_text:
-        detail = "사진만 찍고 끝나는 곳보다 둘러볼 거리나 체험 포인트가 있는 쪽을 우선했어요."
+        detail = "사진만 찍고 끝나는 곳보다 둘러볼 거리가 있는 쪽을 우선했어요."
 
-    return f"좋아요. {request_label} 쪽으로 골라봤어요. {detail}"
+    intro = f"좋아요. {request_label} 쪽으로 골라봤어요."
+    return f"{intro} {detail}".strip() if detail else intro
 
 
 def search_events_from_db(query: str, mood: str = "", limit: int = 20) -> list[dict[str, Any]]:

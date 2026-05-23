@@ -34,6 +34,7 @@ from .agent import (
     _detect_genre_filter,
     _detect_category,
     _build_event_response_message,
+    _curator_intro_with_llm,
     _event_to_card,
     _fallback_reason,
     curate_events_with_llm,
@@ -323,9 +324,12 @@ def format_node(state: EventGraphState) -> EventGraphState:
     relax_note = state.get("relax_note", "")
     curate_ctx = state.get("curate_taste_context") or state.get("taste_context") or {}
 
-    final_msg = _build_event_response_message(
-        query, curate_ctx, curated, relax_note=relax_note,
-    )
+    # 1차: LLM 큐레이터 인트로 시도. 빈 문자열이면 폴백.
+    final_msg = _curator_intro_with_llm(query, curated, relax_note=relax_note)
+    if not final_msg:
+        final_msg = _build_event_response_message(
+            query, curate_ctx, curated, relax_note=relax_note,
+        )
     state["result"] = {
         "status": "ok",
         "message": final_msg,

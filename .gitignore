@@ -52,3 +52,6 @@ surfy-backend/data/
 **/melon_concerts*.json
 **/yanolja_concerts*.csv
 **/yanolja_concerts*.json
+
+# ===== ERD / local schema drafts =====
+*.dbml

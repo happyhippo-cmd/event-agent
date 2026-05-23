@@ -125,6 +125,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "invalid_json"})
                 return
 
+            import time as _time
+            _t0 = _time.perf_counter()
             try:
                 if route == "/api/onboarding/places":
                     payload = run_onboarding_places(data)
@@ -133,6 +135,11 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     payload = run_chat_pipeline(data)
             except Exception as exc:
+                _elapsed = _time.perf_counter() - _t0
+                print(
+                    f"[surfy-backend][TIMING] {route} FAILED in {_elapsed:.2f}s exc={exc}",
+                    flush=True,
+                )
                 self._send_json(
                     500,
                     {
@@ -143,6 +150,16 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
 
+            _elapsed = _time.perf_counter() - _t0
+            if route == "/api/chat":
+                _msg = str(data.get("message") or "")[:40]
+                _resp_text = str(payload.get("response") or "")[:80]
+                _rec_count = len(payload.get("recommendations") or [])
+                print(
+                    f"[surfy-backend][TIMING] /api/chat {_elapsed:.2f}s "
+                    f"msg={_msg!r} recs={_rec_count} resp={_resp_text!r}",
+                    flush=True,
+                )
             self._send_json(200, payload)
             return
         self._send_json(404, {"error": "not found", "path": self.path})

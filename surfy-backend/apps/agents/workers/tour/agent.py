@@ -1,8 +1,12 @@
 """
-Tour Worker Agent — entry node
+Tour Worker Agent — LangGraph 버전
 흐름: 자연어 입력 → [LLM] 위치+취향 추출 → DB/Kakao 검색
-      → [filter] 거리·카테고리 필터 + LLM 선별
-      → [curate] 취향 기반 큐레이션 카드 생성 → dict
+      → [filter] LLM 선별 → [curate] 큐레이션 카드 생성 → dict
+
+노드 구성:
+  extract_intent → (일반 지역) → general_tour → END
+                → (특정 장소) → lookup_location → search_nearby
+                                               → rank_and_curate → build_response → END
 """
 
 from __future__ import annotations
@@ -13,17 +17,20 @@ import sqlite3
 import json
 import requests
 from pathlib import Path
+from typing import TypedDict
 from dotenv import load_dotenv
 
 try:
     from langsmith import traceable
     from langsmith.wrappers import wrap_openai
 except ImportError:
-    def traceable(**_kwargs):  # type: ignore[misc]
+    def traceable(**_kwargs):
         def decorator(fn):
             return fn
         return decorator
     wrap_openai = lambda client: client  # noqa: E731
+
+from langgraph.graph import StateGraph, END
 
 from apps.agents.utils import haversine_km, topic_label
 from apps.agents.state import KDiveState, AGENT_TOURIST
@@ -42,23 +49,12 @@ KAKAO_CAT_URL = "https://dapi.kakao.com/v2/local/search/category.json"
 
 _client = None
 
-
-def _get_client():
-    global _client
-    if _client is None:
-        from openai import OpenAI
-        _client = wrap_openai(OpenAI(api_key=os.getenv("OPENAI_API_KEY")))
-    return _client
-
-
-# AT4: 관광명소, CT1: 문화시설
 KAKAO_TOURIST_CATEGORIES = ["AT4", "CT1"]
-
-ONBOARDING_FIXED_PLACES = ("경복궁", "남산서울타워")
+ONBOARDING_FIXED_PLACES  = ("경복궁", "남산서울타워")
 GENERAL_AREA_HINTS = {
-    "서울": ("서울", "서울특별시"),
+    "서울":    ("서울", "서울특별시"),
     "서울특별시": ("서울", "서울특별시"),
-    "한국": ("서울", "서울특별시"),
+    "한국":    ("서울", "서울특별시"),
     "대한민국": ("서울", "서울특별시"),
 }
 GENERAL_TOUR_TERMS = ("꼭", "대표", "필수", "처음", "여행", "명소", "관광지", "가야")
@@ -106,7 +102,15 @@ MUSIC_PLACE_SEEDS = {
     "글로벌": ("이태원", "성수", "한강", "문화"),
 }
 
-# ── LLM 시스템 프롬프트 ───────────────────────────────────────────────────────
+# ── LLM 클라이언트 ────────────────────────────────────────────────────────────
+
+def _get_client():
+    global _client
+    if _client is None:
+        from openai import OpenAI
+        _client = wrap_openai(OpenAI(api_key=os.getenv("OPENAI_API_KEY")))
+    return _client
+
 
 INTENT_SYSTEM_PROMPT = """
 당신은 한국 관광지 추천 어시스턴트입니다.
@@ -125,7 +129,7 @@ INTENT_SYSTEM_PROMPT = """
 - category_keywords는 실제 DB 카테고리에 포함된 문자열과 일치해야 합니다
 """.strip()
 
-# ── LLM ① : 위치 + 취향 구조화 추출 ─────────────────────────────────────────
+
 @traceable(name="extract_intent")
 def extract_intent_llm(user_message: str) -> dict:
     response = _get_client().chat.completions.create(
@@ -140,7 +144,37 @@ def extract_intent_llm(user_message: str) -> dict:
     return json.loads(response.choices[0].message.content)
 
 
-# ── DB: 위치명으로 좌표 조회 ──────────────────────────────────────────────────
+# ── AgentState ────────────────────────────────────────────────────────────────
+
+class AgentState(TypedDict):
+    # 입력
+    user_message: str
+    radius_km: float
+    user_lat: float | None
+    user_lng: float | None
+    taste_context: dict | None
+    sort_by: str
+    # 의도 추출 결과
+    location_name: str
+    preferences: list[str]
+    category_keywords: list[str]
+    is_general_tour: bool
+    general_area: str
+    # 위치 조회 결과
+    coord: dict
+    # 후보 장소
+    candidates: list[dict]
+    # 선별·큐레이션 결과
+    ranked: list[dict]
+    reason: str
+    curation_map: dict[str, dict]
+    # 최종 출력
+    result: dict
+    error: str | None
+
+
+# ── DB 헬퍼 ──────────────────────────────────────────────────────────────────
+
 def get_location_from_db(location_name: str) -> dict:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -164,7 +198,6 @@ def get_location_from_db(location_name: str) -> dict:
     return {"found": False}
 
 
-# ── DB: 좌표 기반 주변 관광지 조회 (source='korea' 우선) ──────────────────────
 def search_nearby_from_db(latitude: float, longitude: float,
                           radius_km: float = 3.0, limit: int = 20,
                           preferences: list[str] | None = None) -> list[dict]:
@@ -184,7 +217,6 @@ def search_nearby_from_db(latitude: float, longitude: float,
             pref_params.append(f"%{kw}%")
         pref_sql = f"AND ({' OR '.join(clauses)})"
 
-    # place_name별로 source='korea' 우선, 없으면 kakao 1행만 선택
     cursor.execute(
         f"""
         SELECT * FROM (
@@ -220,7 +252,6 @@ def search_nearby_from_db(latitude: float, longitude: float,
     return results[:limit]
 
 
-# ── DB: source='korea' 데이터로 이미지·usetime 보강 ──────────────────────────
 def enrich_korea_images(places: list[dict]) -> list[dict]:
     """kakao 행에 대해 source='korea' 행의 firstimage·firstimage2·usetime을 보강한다."""
     names = [p["place_name"] for p in places if p.get("source") != "korea"]
@@ -233,8 +264,7 @@ def enrich_korea_images(places: list[dict]) -> list[dict]:
         f"""
         SELECT place_name, firstimage, firstimage2, usetime
         FROM tourists
-        WHERE source = 'korea'
-          AND place_name IN ({placeholders})
+        WHERE source = 'korea' AND place_name IN ({placeholders})
         """,
         names,
     ).fetchall()
@@ -248,14 +278,13 @@ def enrich_korea_images(places: list[dict]) -> list[dict]:
         if not korea:
             continue
         if korea.get("firstimage") and not place.get("firstimage"):
-            place["firstimage"] = korea["firstimage"]
+            place["firstimage"]  = korea["firstimage"]
             place["firstimage2"] = korea["firstimage2"]
         if korea.get("usetime") and not place.get("usetime"):
             place["usetime"] = korea["usetime"]
     return places
 
 
-# ── DB: 대표 관광지 조회 (좌표 없는 일반 탐색용) ─────────────────────────────
 def search_representative_from_db(
     area: str = "서울",
     preferences: list[str] | None = None,
@@ -298,8 +327,7 @@ def search_representative_from_db(
     for row in rows:
         if not row.get("place_name"):
             continue
-        score = _representative_score(row)
-        ranked.append((score, {**row, "distance_km": None}))
+        ranked.append((_representative_score(row), {**row, "distance_km": None}))
 
     ranked.sort(key=lambda item: item[0], reverse=True)
     deduped, seen = [], set()
@@ -315,7 +343,7 @@ def search_representative_from_db(
 
 
 def _representative_score(row: dict) -> int:
-    name = row.get("place_name") or ""
+    name     = row.get("place_name") or ""
     category = row.get("category_name") or ""
     score, must_score = 0, 0
     for index, must_name in enumerate(GENERAL_MUST_VISIT_PLACES):
@@ -342,7 +370,8 @@ def _canonical_representative_name(name: str) -> str:
     return name
 
 
-# ── Kakao API: 장소명으로 위치 검색 ──────────────────────────────────────────
+# ── Kakao API 헬퍼 ────────────────────────────────────────────────────────────
+
 def get_location_from_kakao(location_name: str) -> dict:
     try:
         res = requests.get(
@@ -361,13 +390,12 @@ def get_location_from_kakao(location_name: str) -> dict:
     return {
         "found": True, "source": "kakao_api",
         "place_name": doc.get("place_name", ""),
-        "longitude": float(doc.get("x", 0)),
-        "latitude": float(doc.get("y", 0)),
-        "address": doc.get("address_name", ""),
+        "longitude":  float(doc.get("x", 0)),
+        "latitude":   float(doc.get("y", 0)),
+        "address":    doc.get("address_name", ""),
     }
 
 
-# ── Kakao API: 주변 관광지 검색 ──────────────────────────────────────────────
 def search_nearby_from_kakao(latitude: float, longitude: float,
                               radius_km: float = 3.0, limit: int = 20) -> list[dict]:
     radius_m = int(radius_km * 1000)
@@ -398,11 +426,11 @@ def search_nearby_from_kakao(latitude: float, longitude: float,
             results.append({
                 "id": pid, "source": "kakao_api",
                 "place_name": doc.get("place_name", ""),
-                "phone": doc.get("phone", ""),
-                "address": doc.get("address_name", ""),
+                "phone":      doc.get("phone", ""),
+                "address":    doc.get("address_name", ""),
                 "road_address": doc.get("road_address_name", ""),
                 "x": doc.get("x", ""), "y": doc.get("y", ""),
-                "category_name": doc.get("category_name", ""),
+                "category_name":       doc.get("category_name", ""),
                 "category_group_code": doc.get("category_group_code", ""),
                 "category_group_name": doc.get("category_group_name", ""),
                 "place_url": doc.get("place_url", ""),
@@ -415,7 +443,316 @@ def search_nearby_from_kakao(latitude: float, longitude: float,
     return results[:limit]
 
 
+# ── 유틸리티 ──────────────────────────────────────────────────────────────────
+
+def _general_area_from_text(text: str) -> str:
+    for area in GENERAL_AREA_HINTS:
+        if area in text:
+            return "서울" if area in ("한국", "대한민국", "서울특별시") else area
+    return ""
+
+
+def _is_general_tour_request(text: str) -> bool:
+    return any(term in text for term in GENERAL_TOUR_TERMS)
+
+
+def _float_or_none(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+# ── LangGraph 노드 ────────────────────────────────────────────────────────────
+
+def node_extract_intent(state: AgentState) -> AgentState:
+    taste_context = state.get("taste_context") or {}
+    user_message  = state["user_message"]
+
+    # taste_context의 location_keywords 우선 사용
+    location_keywords = taste_context.get("location_keywords") or []
+    if location_keywords:
+        user_message = location_keywords[0]
+
+    intent            = extract_intent_llm(user_message)
+    location_name     = intent.get("location", "").strip()
+    preferences       = intent.get("preferences", [])
+    category_keywords = intent.get("category_keywords", [])
+
+    general_area = (
+        _general_area_from_text(state["user_message"])
+        or _general_area_from_text(location_name)
+    )
+    is_general_tour = (
+        location_name in GENERAL_AREA_HINTS
+        or (not location_name and (general_area or _is_general_tour_request(state["user_message"])))
+    )
+
+    return {
+        **state,
+        "location_name":     location_name,
+        "preferences":       preferences,
+        "category_keywords": category_keywords,
+        "is_general_tour":   is_general_tour,
+        "general_area":      general_area or location_name,
+    }
+
+
+def node_general_tour(state: AgentState) -> AgentState:
+    area              = state.get("general_area") or "서울"
+    preferences       = state.get("preferences", [])
+    category_keywords = state.get("category_keywords", [])
+
+    candidates = search_representative_from_db(
+        area=area, preferences=category_keywords or None, limit=20,
+    )
+    if not candidates and category_keywords:
+        candidates = search_representative_from_db(area=area, limit=20)
+
+    ranked = candidates[:5]
+    reason = (
+        f"{area}을 처음 둘러볼 때 동선에 넣기 좋은 대표 명소를 우선으로 골랐어요."
+        if ranked else "대표 명소 후보 없음"
+    )
+    result = {
+        "current_location": area,
+        "latitude": None, "longitude": None,
+        "address":     area,
+        "data_source": "db_general",
+        "preferences": preferences,
+        "llm_selection_reason": reason,
+        "recommended_places":   ranked,
+        "query_type":    "general_tour",
+        "original_query": state["user_message"],
+    }
+    if not ranked:
+        result["message"] = "해당 관광지를 조회할 수 없습니다."
+    return {**state, "result": result}
+
+
+def node_lookup_location(state: AgentState) -> AgentState:
+    location_name = state["location_name"]
+    coord = get_location_from_db(location_name)
+    if not coord["found"]:
+        coord = get_location_from_db(location_name.replace(" ", ""))
+    if not coord["found"]:
+        coord = get_location_from_kakao(location_name)
+    if not coord.get("found"):
+        return {
+            **state,
+            "coord": {"found": False},
+            "error": f"'{location_name}'을(를) DB와 Kakao API 모두에서 찾지 못했습니다.",
+        }
+    return {**state, "coord": coord}
+
+
+def node_search_nearby(state: AgentState) -> AgentState:
+    coord     = state["coord"]
+    radius_km = state["radius_km"]
+    lat, lon  = coord["latitude"], coord["longitude"]
+
+    if coord["source"] == "db":
+        candidates = search_nearby_from_db(
+            lat, lon, radius_km=radius_km,
+            preferences=state.get("category_keywords") or None,
+        )
+    else:
+        candidates = search_nearby_from_kakao(lat, lon, radius_km=radius_km)
+
+    candidates = [p for p in candidates if p["place_name"] != coord["place_name"]]
+    candidates = enrich_korea_images(candidates)
+    return {**state, "candidates": candidates}
+
+
+def node_rank_and_curate(state: AgentState) -> AgentState:
+    candidates   = state["candidates"]
+    user_message = state["user_message"]
+    preferences  = state.get("preferences", [])
+    sort_by      = state.get("sort_by", "preference")
+
+    if not candidates:
+        return {**state, "ranked": [], "reason": "후보 없음", "curation_map": {}}
+
+    if sort_by == "distance":
+        ranked = sorted(candidates, key=lambda p: p.get("distance_km") or float("inf"))[:5]
+        reason = "거리 가까운 순 정렬"
+    else:
+        ranked, reason = rank_tour_places(candidates, user_message, preferences)
+
+    curation_map: dict[str, dict] = {}
+    if ranked:
+        try:
+            curation_map = curate_tour_items(ranked, preferences)
+        except Exception:
+            pass
+
+    return {**state, "ranked": ranked, "reason": reason, "curation_map": curation_map}
+
+
+def node_build_response(state: AgentState) -> AgentState:
+    coord        = state["coord"]
+    ranked       = state["ranked"]
+    curation_map = state["curation_map"]
+    user_lat     = state.get("user_lat")
+    user_lng     = state.get("user_lng")
+
+    for place in ranked:
+        pid      = str(place.get("id", place.get("place_id", "")))
+        curation = curation_map.get(pid, {
+            "headline":    place["place_name"],
+            "description": (place.get("overview") or "")[:150],
+            "highlights":  [],
+            "visit_tip":   "",
+        })
+        if place.get("usetime"):
+            curation["operate_time"] = place["usetime"]
+        if place.get("firstimage"):
+            curation["image_url"]   = place["firstimage"]
+        if place.get("firstimage2"):
+            curation["image_url_2"] = place["firstimage2"]
+
+        # 사용자 실제 좌표 기준 도보 시간 보정
+        dist_km = place.get("distance_km")
+        if user_lat is not None and user_lng is not None:
+            try:
+                dist_km = haversine_km(user_lat, user_lng, float(place["y"]), float(place["x"]))
+                curation["walk_minutes"] = max(1, round(dist_km / 4.0 * 60))
+            except (TypeError, ValueError):
+                pass
+
+        curation.update(check_visitability(place.get("usetime") or "", dist_km))
+        curation["card_text"] = build_card_text(curation)
+        place["curation"] = curation
+
+    result = {
+        "current_location": coord["place_name"],
+        "latitude":  coord["latitude"],
+        "longitude": coord["longitude"],
+        "address":   coord["address"],
+        "data_source": coord["source"],
+        "preferences": state.get("preferences", []),
+        "llm_selection_reason": state["reason"],
+        "recommended_places":   ranked,
+    }
+    if not ranked:
+        result["message"] = "해당 관광지를 조회할 수 없습니다."
+    return {**state, "result": result}
+
+
+# ── 라우팅 조건 ──────────────────────────────────────────────────────────────
+
+def _route_after_intent(state: AgentState) -> str:
+    if state.get("is_general_tour"):
+        return "general_tour"
+    if state.get("location_name"):
+        return "lookup_location"
+    return END
+
+
+def _route_after_lookup(state: AgentState) -> str:
+    if state.get("coord", {}).get("found"):
+        return "search_nearby"
+    return END
+
+
+# ── 그래프 빌드 ──────────────────────────────────────────────────────────────
+
+def _build_graph():
+    g = StateGraph(AgentState)
+
+    g.add_node("extract_intent",  node_extract_intent)
+    g.add_node("general_tour",    node_general_tour)
+    g.add_node("lookup_location", node_lookup_location)
+    g.add_node("search_nearby",   node_search_nearby)
+    g.add_node("rank_and_curate", node_rank_and_curate)
+    g.add_node("build_response",  node_build_response)
+
+    g.set_entry_point("extract_intent")
+    g.add_conditional_edges(
+        "extract_intent", _route_after_intent,
+        {"general_tour": "general_tour", "lookup_location": "lookup_location", END: END},
+    )
+    g.add_conditional_edges(
+        "lookup_location", _route_after_lookup,
+        {"search_nearby": "search_nearby", END: END},
+    )
+    g.add_edge("general_tour",    END)
+    g.add_edge("search_nearby",   "rank_and_curate")
+    g.add_edge("rank_and_curate", "build_response")
+    g.add_edge("build_response",  END)
+
+    return g.compile()
+
+
+_graph = _build_graph()
+
+
+# ── 공개 진입점 ──────────────────────────────────────────────────────────────
+
+@traceable(name="tourism_agent_run")
+def run_agent(
+    user_message: str,
+    radius_km: float = 3.0,
+    user_lat: float | None = None,
+    user_lng: float | None = None,
+    taste_context: dict | None = None,
+    sort_by: str = "preference",
+) -> str:
+    initial: AgentState = {
+        "user_message":      user_message,
+        "radius_km":         radius_km,
+        "user_lat":          user_lat,
+        "user_lng":          user_lng,
+        "taste_context":     taste_context,
+        "sort_by":           sort_by,
+        "location_name":     "",
+        "preferences":       [],
+        "category_keywords": [],
+        "is_general_tour":   False,
+        "general_area":      "",
+        "coord":             {},
+        "candidates":        [],
+        "ranked":            [],
+        "reason":            "",
+        "curation_map":      {},
+        "result":            {},
+        "error":             None,
+    }
+    final = _graph.invoke(initial)
+    if final.get("error"):
+        return json.dumps({"error": final["error"]}, ensure_ascii=False)
+    return json.dumps(final["result"], ensure_ascii=False, indent=2)
+
+
+def run_tour_agent_for_state(state: KDiveState, radius_km: float = 3.0) -> KDiveState:
+    """Supervisor가 KDiveState로 tour agent를 직접 실행하는 진입점."""
+    if AGENT_TOURIST not in (state.get("target_agents") or []):
+        return state
+
+    travel_phase = state.get("travel_phase", "unknown")
+    if travel_phase == "during_trip":
+        radius_km = 1.5
+    elif travel_phase == "pre_trip":
+        radius_km = 5.0
+
+    agent_contexts = state.get("agent_taste_contexts") or {}
+    taste   = agent_contexts.get(AGENT_TOURIST) or state.get("taste_context") or {}
+    sort_by = state.get("tour_sort_by", "preference")
+
+    raw_json = run_agent(
+        user_message=state["user_utterance"],
+        radius_km=radius_km,
+        user_lat=state.get("user_lat"),
+        user_lng=state.get("user_lng"),
+        taste_context=taste,
+        sort_by=sort_by,
+    )
+    state["tourist_result"] = json.loads(raw_json)
+    return state
+
+
 # ── 온보딩: 음악 키워드 기반 관광지 추천 ────────────────────────────────────
+
 def recommend_places_for_music_keywords(
     tracks: list[dict],
     per_keyword: int = 3,
@@ -440,8 +777,8 @@ def recommend_places_for_music_keywords(
             )
 
     for track in tracks:
-        keyword = _track_keyword(track)
-        terms = _terms_for_track(track)
+        keyword    = _track_keyword(track)
+        terms      = _terms_for_track(track)
         candidates = _rank_rows_for_terms(rows, terms, used_names)[:per_keyword]
         for row in candidates:
             used_names.add(row["place_name"])
@@ -501,11 +838,6 @@ def _terms_for_track(track: dict) -> list[str]:
     return list(dict.fromkeys(expanded))
 
 
-def _best_row_for_terms(rows: list[dict], terms: list[str], used_names: set[str]) -> dict | None:
-    ranked = _rank_rows_for_terms(rows, terms, used_names)
-    return ranked[0] if ranked else None
-
-
 def _best_fixed_row(rows: list[dict], fixed_name: str, used_names: set[str]) -> dict | None:
     exact = [
         row for row in rows
@@ -514,7 +846,7 @@ def _best_fixed_row(rows: list[dict], fixed_name: str, used_names: set[str]) -> 
     if exact:
         exact.sort(key=lambda row: 1 if row.get("firstimage") else 0, reverse=True)
         return exact[0]
-    return _best_row_for_terms(rows, [fixed_name], used_names)
+    return _rank_rows_for_terms(rows, [fixed_name], used_names)[0] if _rank_rows_for_terms(rows, [fixed_name], used_names) else None
 
 
 def _rank_rows_for_terms(rows: list[dict], terms: list[str], used_names: set[str]) -> list[dict]:
@@ -552,251 +884,28 @@ def _onboarding_place_from_row(
     category: str,
     reason: str,
 ) -> dict:
-    name = row.get("place_name") or "추천 장소"
-    address = row.get("road_address") or row.get("address") or ""
+    name       = row.get("place_name") or "추천 장소"
+    address    = row.get("road_address") or row.get("address") or ""
     photo_urls = [url for url in (row.get("firstimage"), row.get("firstimage2")) if url]
     if category == "must":
-        curation = f"{_topic_label(name)} {reason}"
+        curation = f"{topic_label(name)} {reason}"
     else:
-        curation = f"{_topic_label(name)} 선택한 노래의 {source_keyword} 무드와 이어지는 관광지 후보예요."
+        curation = f"{topic_label(name)} 선택한 노래의 {source_keyword} 무드와 이어지는 관광지 후보예요."
     return {
-        "key": f"tourist::{name}::{row.get('id') or name}",
-        "id": row.get("id") or name,
-        "source_agent": "tourist",
-        "name": name,
-        "category": category,
-        "label": label,
+        "key":            f"tourist::{name}::{row.get('id') or name}",
+        "id":             row.get("id") or name,
+        "source_agent":   "tourist",
+        "name":           name,
+        "category":       category,
+        "label":          label,
         "source_keyword": source_keyword,
-        "address": address,
-        "area": row.get("area") or "",
-        "lat": _float_or_none(row.get("y")),
-        "lng": _float_or_none(row.get("x")),
-        "photo_url": photo_urls[0] if photo_urls else None,
-        "photo_urls": photo_urls,
-        "desc": curation,
-        "curation": curation,
-        "place_url": row.get("place_url") or "",
+        "address":        address,
+        "area":           row.get("area") or "",
+        "lat":            _float_or_none(row.get("y")),
+        "lng":            _float_or_none(row.get("x")),
+        "photo_url":      photo_urls[0] if photo_urls else None,
+        "photo_urls":     photo_urls,
+        "desc":           curation,
+        "curation":       curation,
+        "place_url":      row.get("place_url") or "",
     }
-
-
-def _topic_label(name: str) -> str:
-    return topic_label(name)
-
-
-def _float_or_none(value):
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _general_area_from_text(text: str) -> str:
-    for area in GENERAL_AREA_HINTS:
-        if area in text:
-            return "서울" if area in ("한국", "대한민국", "서울특별시") else area
-    return ""
-
-
-def _is_general_tour_request(text: str) -> bool:
-    return any(term in text for term in GENERAL_TOUR_TERMS)
-
-
-def _general_tour_response(
-    area: str,
-    user_message: str,
-    preferences: list[str],
-    category_keywords: list[str],
-) -> dict:
-    candidates = search_representative_from_db(
-        area=area or "서울",
-        preferences=category_keywords or None,
-        limit=20,
-    )
-    if not candidates and category_keywords:
-        candidates = search_representative_from_db(area=area or "서울", limit=20)
-
-    ranked = candidates[:5]
-    reason = (
-        f"{area or '서울'}을 처음 둘러볼 때 동선에 넣기 좋은 대표 명소를 우선으로 골랐어요."
-        if ranked else "대표 명소 후보 없음"
-    )
-    result = {
-        "current_location": area or "서울",
-        "latitude": None, "longitude": None,
-        "address": area or "서울",
-        "data_source": "db_general",
-        "preferences": preferences,
-        "llm_selection_reason": reason,
-        "recommended_places": ranked,
-        "query_type": "general_tour",
-        "original_query": user_message,
-    }
-    if not ranked:
-        result["message"] = "해당 관광지를 조회할 수 없습니다."
-    return result
-
-
-# ── Agent 진입점 ──────────────────────────────────────────────────────────────
-@traceable(name="tourism_agent_run")
-def run(user_message: str, radius_km: float = 3.0, sort_by: str = "preference") -> dict:
-    """Tour agent entry node. Returns a dict with recommended_places + curation.
-
-    sort_by: "preference" — LLM 취향 기반 선별 (기본값)
-             "distance"   — 거리 가까운 순 정렬
-    """
-
-    # Step 1: LLM — 위치 + 취향 추출
-    intent = extract_intent_llm(user_message)
-    location_name     = intent.get("location", "").strip()
-    preferences       = intent.get("preferences", [])
-    category_keywords = intent.get("category_keywords", [])
-    general_area = _general_area_from_text(user_message) or _general_area_from_text(location_name)
-
-    if not location_name:
-        if general_area or _is_general_tour_request(user_message):
-            return _general_tour_response(general_area or "서울", user_message, preferences, category_keywords)
-        return {"error": "위치를 인식하지 못했습니다."}
-
-    if location_name in GENERAL_AREA_HINTS:
-        return _general_tour_response(general_area or location_name, user_message, preferences, category_keywords)
-
-    # Step 2: DB 위치 조회
-    coord = get_location_from_db(location_name)
-    if not coord["found"]:
-        coord = get_location_from_db(location_name.replace(" ", ""))
-
-    # Step 3: DB 없으면 Kakao API fallback
-    if not coord["found"]:
-        coord = get_location_from_kakao(location_name)
-    if not coord["found"]:
-        return {"error": f"'{location_name}'을(를) DB와 Kakao API 모두에서 찾지 못했습니다."}
-
-    lat, lon = coord["latitude"], coord["longitude"]
-
-    # Step 4: 주변 관광지 검색
-    if coord["source"] == "db":
-        candidates = search_nearby_from_db(lat, lon, radius_km=radius_km,
-                                           preferences=category_keywords or None)
-    else:
-        candidates = search_nearby_from_kakao(lat, lon, radius_km=radius_km)
-
-    candidates = [p for p in candidates if p["place_name"] != coord["place_name"]]
-    candidates = enrich_korea_images(candidates)
-
-    # Step 5: filter — 최적 장소 선별·재정렬
-    if candidates:
-        if sort_by == "distance":
-            ranked = sorted(candidates, key=lambda p: p.get("distance_km") or float("inf"))[:5]
-            reason = "거리 가까운 순 정렬"
-        else:
-            ranked, reason = rank_tour_places(candidates, user_message, preferences)
-    else:
-        ranked, reason = [], "후보 없음"
-
-    # Step 6: curate — 큐레이션 카드 생성
-    curation_map: dict[str, dict] = {}
-    if ranked:
-        try:
-            curation_map = curate_tour_items(ranked, preferences)
-        except Exception:
-            pass
-
-    for place in ranked:
-        pid = str(place.get("id", place.get("place_id", "")))
-        curation = curation_map.get(pid, {
-            "headline": place["place_name"],
-            "description": (place.get("overview") or "")[:150],
-            "highlights": [],
-            "visit_tip": "",
-        })
-        # DB usetime → operate_time 직접 반영
-        if place.get("usetime"):
-            curation["operate_time"] = place["usetime"]
-        if place.get("firstimage"):
-            curation["image_url"] = place["firstimage"]
-        if place.get("firstimage2"):
-            curation["image_url_2"] = place["firstimage2"]
-        curation.update(check_visitability(place.get("usetime") or "", place.get("distance_km")))
-        curation["card_text"] = build_card_text(curation)
-        place["curation"] = curation
-
-    result = {
-        "current_location": coord["place_name"],
-        "latitude": lat,
-        "longitude": lon,
-        "address": coord["address"],
-        "data_source": coord["source"],
-        "preferences": preferences,
-        "llm_selection_reason": reason,
-        "recommended_places": ranked,
-    }
-    if not ranked:
-        result["message"] = "해당 관광지를 조회할 수 없습니다."
-    return result
-
-
-@traceable(name="tourism_agent_run")
-def run_agent(
-    user_message: str,
-    radius_km: float = 3.0,
-    user_lat: float | None = None,
-    user_lng: float | None = None,
-    taste_context: dict | None = None,
-    sort_by: str = "preference",
-) -> str:
-    """Tour agent 진입점. str JSON을 반환한다 (reference run_agent 시그니처 호환).
-
-    taste_context에 location_keywords가 있으면 첫 번째 키워드를 위치로 우선 사용.
-    """
-    if taste_context:
-        location_keywords = taste_context.get("location_keywords") or []
-        if location_keywords:
-            user_message = location_keywords[0]
-
-    result = run(user_message=user_message, radius_km=radius_km, sort_by=sort_by)
-    if result.get("error"):
-        return json.dumps({"error": result["error"]}, ensure_ascii=False)
-
-    # 사용자 실제 좌표가 있으면 장소까지의 도보 시간·방문 가능 여부를 사용자 위치 기준으로 보정
-    if user_lat is not None and user_lng is not None:
-        for place in result.get("recommended_places") or []:
-            try:
-                user_dist_km = haversine_km(
-                    user_lat, user_lng, float(place["y"]), float(place["x"])
-                )
-                walk_min = max(1, round(user_dist_km / 4.0 * 60))
-                curation = place.get("curation") or {}
-                curation["walk_minutes"] = walk_min
-                curation.update(
-                    check_visitability(place.get("usetime") or "", user_dist_km)
-                )
-                curation["card_text"] = build_card_text(curation)
-            except (TypeError, ValueError):
-                pass
-
-    return json.dumps(result, ensure_ascii=False, indent=2)
-
-
-def run_tour_agent_for_state(state: KDiveState, radius_km: float = 3.0) -> KDiveState:
-    """Supervisor가 tourist로 라우팅했을 때 KDiveState를 받아 tour agent를 실행한다."""
-    if AGENT_TOURIST not in (state.get("target_agents") or []):
-        return state
-
-    travel_phase = state.get("travel_phase", "unknown")
-    if travel_phase == "during_trip":
-        radius_km = 1.5
-    elif travel_phase == "pre_trip":
-        radius_km = 5.0
-
-    agent_contexts = state.get("agent_taste_contexts") or {}
-    taste = agent_contexts.get(AGENT_TOURIST) or state.get("taste_context") or {}
-    sort_by = state.get("tour_sort_by", "preference")
-
-    raw_json = run_agent(
-        user_message=state["user_utterance"],
-        radius_km=radius_km,
-        taste_context=taste,
-        sort_by=sort_by,
-    )
-    state["tourist_result"] = json.loads(raw_json)
-    return state

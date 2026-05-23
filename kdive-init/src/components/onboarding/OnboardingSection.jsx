@@ -1,17 +1,36 @@
 'use client';
 
+import { useEffect, useRef, useState } from 'react';
 import { useKdive } from '@/store/KdiveContext';
 import AlbumCarousel from './AlbumCarousel';
 import PlayerBar from '@/components/player/PlayerBar';
 
 export default function OnboardingSection() {
-  const { loggedIn, playerSlot } = useKdive();
-  if (loggedIn) return null;
+  const { appPhase, playerSlot } = useKdive();
+  const sectionRef = useRef(null);
+  const [popped, setPopped] = useState(false);
+
+  // appPhase가 'onboarding'이 되면 스크롤 + 팝 애니메이션 발동
+  useEffect(() => {
+    if (appPhase !== 'onboarding') return;
+    setPopped(false);
+    document.getElementById('section-onboarding')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const timer = setTimeout(() => setPopped(true), 80);
+    return () => clearTimeout(timer);
+  }, [appPhase]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (appPhase !== 'onboarding') return null;
 
   return (
     <section
+      ref={sectionRef}
       id="section-onboarding"
       className="flex flex-col justify-start px-5 pt-[clamp(86px,10vh,112px)] pb-[clamp(24px,4vh,42px)] max-[760px]:px-4"
+      style={{
+        opacity: popped ? 1 : 0,
+        transform: popped ? 'translateY(0) scale(1)' : 'translateY(44px) scale(0.96)',
+        transition: 'opacity 0.65s cubic-bezier(0.34,1.56,0.64,1), transform 0.65s cubic-bezier(0.34,1.56,0.64,1)',
+      }}
     >
       <div className="flex items-center gap-2 w-[min(1160px,calc(100%-clamp(48px,6vw,96px)))] mx-auto text-[12px] font-medium tracking-[0.14em] uppercase text-muted mb-3 max-[760px]:w-full">
         <span className="block w-6 h-px bg-accent" />
@@ -28,7 +47,6 @@ export default function OnboardingSection() {
 
       <div className="flex flex-col gap-[clamp(8px,1.2vh,12px)]">
         <AlbumCarousel />
-        {/* 플레이어 바: 온보딩 슬롯에 위치할 때만 렌더 */}
         {playerSlot === 'onboarding' && (
           <div
             id="onboardingPlayerSlot"

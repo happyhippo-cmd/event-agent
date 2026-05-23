@@ -44,6 +44,12 @@ export function KdiveProvider({ children }) {
   const [curationVisible, setCurationVisible] = useState(false);
   const [foodVisible, setFoodVisible] = useState(false);
   const [authVisible, setAuthVisible] = useState(false);
+  const [authInitialTab, setAuthInitialTab] = useState('login');
+  const [guestMode, setGuestMode] = useState(false);
+  // 'onboarding': 온보딩 화면 | 'app': 로그인 후 메인 앱 화면
+  const [appPhase, setAppPhase] = useState(null);
+  // 현재 로그인된 유저 정보
+  const [currentUser, setCurrentUser] = useState(null);
   const [loggedIn, setLoggedIn] = useState(false);
   const [activeAppPage, setActiveAppPage] = useState('surfy');
   // 큐레이션 내부 상태
@@ -397,10 +403,16 @@ export function KdiveProvider({ children }) {
     void deleteHistoryItem(itemKey).catch(() => {});
   }, [pendingUnlikeKeys]);
 
-  const showAuth = useCallback(() => {
+  const showAuth = useCallback((tab = 'login') => {
+    setAuthInitialTab(tab);
     setAuthVisible(true);
     scrollToSection('authSection');
   }, [scrollToSection]);
+
+  const goGuest = useCallback(() => {
+    setGuestMode(true);
+    setAppPhase('onboarding');
+  }, []);
   const hideAuth = useCallback(() => setAuthVisible(false), []);
   const showFood = useCallback(() => {
     setFoodVisible(true);
@@ -434,25 +446,31 @@ export function KdiveProvider({ children }) {
     setFoodVisible(false);
     setAuthVisible(false);
     setPlayerSlot('onboarding');
+    setAppPhase('onboarding');
     scrollToSection('section-onboarding');
   }, [scrollToSection]);
 
-  const loginToSurfy = useCallback(() => {
+  // 비회원 → 로그인/회원가입 전환 (guestMode 해제 후 authSection 표시)
+  const convertGuestToAuth = useCallback((tab = 'login') => {
+    setGuestMode(false);
+    setAuthInitialTab(tab);
+    setAuthVisible(true);
+    scrollToSection('authSection');
+  }, [scrollToSection]);
+
+  const loginToSurfy = useCallback((user = null) => {
     setLoggedIn(true);
-    setActiveAppPage('surfy');
-    setCurationVisible(false);
+    setCurrentUser(user);
     setAuthVisible(false);
+    setCurationVisible(false);
     setFoodVisible(false);
     setPlayerSlot('onboarding');
-    if (typeof window !== 'undefined') {
-      window.requestAnimationFrame(() => {
-        window.scrollTo({ top: 0, behavior: 'auto' });
-      });
-    }
+    setAppPhase('onboarding'); // 로그인 후 온보딩 먼저
   }, []);
 
   const showAppPage = useCallback((page) => {
     setActiveAppPage(page);
+    setAppPhase('app'); // 온보딩 → 앱으로 전환
     if (typeof window !== 'undefined') {
       window.requestAnimationFrame(() => {
         window.scrollTo({ top: 0, behavior: 'auto' });
@@ -468,28 +486,28 @@ export function KdiveProvider({ children }) {
     visitedHistoryKeys, visitedHistoryRecords,
     pendingUnlikeKeys,
     onboardingPlaces, placesLoading, placesError,
-    curationVisible, foodVisible, authVisible, loggedIn, activeAppPage,
+    curationVisible, foodVisible, authVisible, authInitialTab, guestMode, appPhase, loggedIn, currentUser, activeAppPage,
     selectedPlaceIndex, setSelectedPlaceIndex,
     isPlaying, setIsPlaying,
     waveformProgress, setWaveformProgress,
     playerSlot, setPlayerSlot,
     goToIndex, nextCard, prevCard,
     toggleTrackLike, togglePlaceLike, toggleFoodLike, toggleHistoryVisit, togglePendingUnlike,
-    showAuth, hideAuth, showFood, hideFood,
-    retryOnboardingPlaces, showCurationForAlbum, goBackToOnboarding, loginToSurfy, showAppPage,
+    showAuth, hideAuth, showFood, hideFood, goGuest,
+    retryOnboardingPlaces, showCurationForAlbum, goBackToOnboarding, loginToSurfy, showAppPage, convertGuestToAuth,
   }), [
     currentIdx, activeAlbum, activeAlbumId,
     likedTrackIds, likedPlaceKeys, likedPlaceRecords, likedFoodKeys, likedFoodRecords,
     visitedHistoryKeys, visitedHistoryRecords,
     pendingUnlikeKeys,
     onboardingPlaces, placesLoading, placesError,
-    curationVisible, foodVisible, authVisible, loggedIn, activeAppPage,
+    curationVisible, foodVisible, authVisible, authInitialTab, guestMode, appPhase, loggedIn, currentUser, activeAppPage,
     selectedPlaceIndex,
     isPlaying, waveformProgress, playerSlot,
     goToIndex, nextCard, prevCard,
     toggleTrackLike, togglePlaceLike, toggleFoodLike, toggleHistoryVisit, togglePendingUnlike,
-    showAuth, hideAuth, showFood, hideFood,
-    retryOnboardingPlaces, showCurationForAlbum, goBackToOnboarding, loginToSurfy, showAppPage,
+    showAuth, hideAuth, showFood, hideFood, goGuest,
+    retryOnboardingPlaces, showCurationForAlbum, goBackToOnboarding, loginToSurfy, showAppPage, convertGuestToAuth,
   ]);
 
   return <KdiveContext.Provider value={value}>{children}</KdiveContext.Provider>;

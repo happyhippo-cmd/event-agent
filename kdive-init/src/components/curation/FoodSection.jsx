@@ -11,9 +11,139 @@ import {
 import { useKdive } from '@/store/KdiveContext';
 import { getSurfyApiUrl } from '@/utils/surfyApi';
 
+function GuestUpgradeModal({ onClose, onLogin, onSignup }) {
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 9999,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '20px',
+        background: 'rgba(0,0,0,0.45)',
+        backdropFilter: 'blur(4px)',
+      }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div
+        style={{
+          width: '100%',
+          maxWidth: 420,
+          background: '#ffffff',
+          borderRadius: 24,
+          padding: 'clamp(28px,5vh,40px) 32px 32px',
+          boxShadow: '0 20px 60px rgba(0,0,0,0.18)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          textAlign: 'center',
+          position: 'relative',
+        }}
+      >
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="닫기"
+          style={{
+            position: 'absolute',
+            top: 16,
+            right: 16,
+            width: 32,
+            height: 32,
+            border: 'none',
+            background: 'rgba(0,0,0,0.06)',
+            borderRadius: '50%',
+            fontSize: 16,
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: '#888',
+          }}
+        >
+          ✕
+        </button>
+
+        <div style={{ fontSize: 44, marginBottom: 16 }}>✈️</div>
+
+        <p
+          style={{
+            fontSize: 11,
+            letterSpacing: '0.14em',
+            textTransform: 'uppercase',
+            color: '#00A8E8',
+            marginBottom: 10,
+            fontWeight: 700,
+          }}
+        >
+          K-Dive 회원 전용
+        </p>
+
+        <h2
+          className="font-serif"
+          style={{ fontSize: 22, lineHeight: 1.3, color: '#111111', marginBottom: 12 }}
+        >
+          더 많은 정보를 탐색하고 싶으신가요?
+        </h2>
+
+        <p style={{ fontSize: 14, color: '#888888', lineHeight: 1.7, marginBottom: 28 }}>
+          K-Dive 회원이 되면 <strong style={{ color: '#111' }}>Surfy AI</strong>와 함께
+          나만의 K-Pop 여행 코스를 무한으로 탐색할 수 있어요.
+        </p>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, width: '100%' }}>
+          <button
+            type="button"
+            onClick={onSignup}
+            style={{
+              height: 50,
+              width: '100%',
+              borderRadius: 12,
+              border: 'none',
+              background: 'linear-gradient(135deg, #00A8E8, #006FE8)',
+              color: '#ffffff',
+              fontSize: 15,
+              fontWeight: 700,
+              cursor: 'pointer',
+              letterSpacing: '0.02em',
+            }}
+          >
+            회원가입하기
+          </button>
+          <button
+            type="button"
+            onClick={onLogin}
+            style={{
+              height: 46,
+              width: '100%',
+              borderRadius: 12,
+              border: '1px solid rgba(0,0,0,0.12)',
+              background: '#ffffff',
+              color: '#444444',
+              fontSize: 14,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            이미 계정이 있어요 — 로그인
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function FoodSection({ places = [] }) {
-  const { activeAlbum, foodVisible, likedPlaceKeys, likedFoodKeys, toggleFoodLike, showAuth } = useKdive();
+  const {
+    activeAlbum, foodVisible, likedPlaceKeys, likedFoodKeys, toggleFoodLike,
+    loggedIn, guestMode, showAppPage, convertGuestToAuth,
+  } = useKdive();
   const [activeFoodKey, setActiveFoodKey] = useState(null);
+  const [upgradeOpen, setUpgradeOpen] = useState(false);
   const [agentFoods, setAgentFoods] = useState([]);
   const [foodsLoading, setFoodsLoading] = useState(false);
   const [foodsError, setFoodsError] = useState('');
@@ -182,12 +312,25 @@ export default function FoodSection({ places = [] }) {
         ) : null}
         <button
           type="button"
-          onClick={showAuth}
+          onClick={() => {
+            if (loggedIn) {
+              showAppPage('surfy');
+            } else {
+              setUpgradeOpen(true);
+            }
+          }}
           className="w-full min-h-[46px] border border-[rgba(0,0,0,0.08)] rounded-[14px] bg-white text-text font-pretendard text-[13px] font-semibold cursor-pointer transition-all hover:shadow-[0_4px_14px_rgba(0,0,0,0.04)]"
         >
           더 많은 장소를 탐색하고 싶다면?
         </button>
       </div>
+      {upgradeOpen && (
+        <GuestUpgradeModal
+          onClose={() => setUpgradeOpen(false)}
+          onLogin={() => { setUpgradeOpen(false); convertGuestToAuth('login'); }}
+          onSignup={() => { setUpgradeOpen(false); convertGuestToAuth('signup'); }}
+        />
+      )}
     </section>
   );
 }

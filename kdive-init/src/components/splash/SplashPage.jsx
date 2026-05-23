@@ -1,65 +1,7 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useKdive } from '@/store/KdiveContext';
-
-/* ─────────────────────────────────────────────
-   Canvas 거품 파티클
-───────────────────────────────────────────── */
-function useFoamCanvas(canvasRef) {
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-
-    const resize = () => {
-      canvas.width  = canvas.offsetWidth;
-      canvas.height = canvas.offsetHeight;
-    };
-    resize();
-    const ro = new ResizeObserver(resize);
-    ro.observe(canvas);
-
-    const mkP = (w, h) => ({
-      x:    Math.random() * w,
-      y:    h * 0.6 + Math.random() * h * 0.4,
-      r:    0.7 + Math.random() * 3,
-      op:   0.3 + Math.random() * 0.55,
-      vx:   (Math.random() - 0.5) * 0.45,
-      vy:   -0.1 - Math.random() * 0.55,
-      life: 0,
-      max:  80 + Math.random() * 120,
-    });
-
-    const W = () => canvas.width;
-    const H = () => canvas.height;
-    const particles = Array.from({ length: 90 }, () => {
-      const p = mkP(canvas.width, canvas.height);
-      p.life = Math.random() * p.max;
-      return p;
-    });
-
-    let rafId;
-    const tick = () => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      particles.forEach((p, i) => {
-        p.life++;
-        if (p.life >= p.max) { particles[i] = mkP(W(), H()); return; }
-        p.x += p.vx;
-        p.y += p.vy;
-        const alpha = p.op * Math.sin((p.life / p.max) * Math.PI);
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(255,255,255,${alpha.toFixed(3)})`;
-        ctx.fill();
-      });
-      rafId = requestAnimationFrame(tick);
-    };
-    tick();
-
-    return () => { cancelAnimationFrame(rafId); ro.disconnect(); };
-  }, [canvasRef]);
-}
 
 /* ─────────────────────────────────────────────
    수면 반짝임 (고정값 — hydration 안전)
@@ -82,30 +24,24 @@ const SHIMMERS = [
 export default function SplashPage() {
   const { loggedIn } = useKdive();
   const [mounted, setMounted] = useState(false);
-  const canvasRef = useRef(null);
-
-  useFoamCanvas(canvasRef);
 
   useEffect(() => {
-    const t = setTimeout(() => setMounted(true), 80);
+    const t = setTimeout(() => setMounted(true), 100);
     return () => clearTimeout(t);
   }, []);
 
   if (loggedIn) return null;
 
-  const scrollDown = () =>
-    document.getElementById('section-onboarding')?.scrollIntoView({ behavior: 'smooth' });
-
   return (
     <>
       <style>{`
         @keyframes kd-fade-up {
-          from { opacity: 0; transform: translateY(22px); }
+          from { opacity: 0; transform: translateY(28px); }
           to   { opacity: 1; transform: translateY(0); }
         }
-        @keyframes kd-arrow-bob {
-          0%,100% { transform: translateX(-50%) translateY(0);   opacity: .7; }
-          50%      { transform: translateX(-50%) translateY(9px); opacity: 1;  }
+        @keyframes kd-bounce-down {
+          0%,100% { transform: translateX(-50%) translateY(0);   opacity: .55; }
+          50%      { transform: translateX(-50%) translateY(9px); opacity: 1;   }
         }
         @keyframes kd-shimmer {
           0%,100% { opacity: 0; transform: scaleX(1);   }
@@ -115,10 +51,13 @@ export default function SplashPage() {
 
       <section
         id="section-splash"
-        className="relative w-full overflow-hidden"
-        style={{ height: '100svh' }}
+        style={{
+          position: 'relative',
+          width: '100%',
+          overflow: 'hidden',
+        }}
       >
-        {/* ── 레이어 0: CSS 폴백 배경 ── */}
+        {/* ── 레이어 0: CSS 폴백 배경 (absolute로 영상 뒤를 채움) ── */}
         <div
           className="absolute inset-0"
           style={{
@@ -129,19 +68,25 @@ export default function SplashPage() {
           }}
         />
 
-        {/* ── 레이어 1: 실사 비디오 — filter 없음 (원본 컬러) ── */}
+        {/* ── 레이어 1: 실사 비디오 — 16:9 원본 비율, 섹션 높이를 결정 ── */}
         <video
           autoPlay
           muted
           loop
           playsInline
-          className="absolute inset-0 w-full h-full"
-          style={{ zIndex: 1, objectFit: 'cover' }}
+          style={{
+            display: 'block',
+            width: '100%',
+            aspectRatio: '16 / 9',
+            objectFit: 'contain',
+            position: 'relative',
+            zIndex: 1,
+          }}
         >
           <source src="/videos/ocean.mp4" type="video/mp4" />
         </video>
 
-        {/* ── 레이어 2: 텍스트 가독성 오버레이 (좌측만 살짝) ── */}
+        {/* ── 레이어 2: 텍스트 가독성 오버레이 ── */}
         <div
           className="absolute inset-0"
           style={{
@@ -161,13 +106,6 @@ export default function SplashPage() {
           }}
         />
 
-        {/* ── 레이어 5: Canvas 거품 파티클 ── */}
-        <canvas
-          ref={canvasRef}
-          className="absolute inset-0 w-full h-full pointer-events-none"
-          style={{ zIndex: 5 }}
-        />
-
         {/* ── 레이어 6: 수면 반짝임 ── */}
         {SHIMMERS.map((s, i) => (
           <div
@@ -183,10 +121,10 @@ export default function SplashPage() {
           />
         ))}
 
-        {/* ── 레이어 10: 텍스트 ── */}
+        {/* ── 레이어 10: 텍스트 (absolute로 영상 위에 오버레이) ── */}
         <div
-          className="relative flex flex-col justify-center px-[clamp(32px,10vw,120px)]"
-          style={{ height: '52%', zIndex: 10 }}
+          className="absolute flex flex-col justify-center px-[clamp(32px,10vw,120px)]"
+          style={{ top: 0, left: 0, right: 0, height: '55%', zIndex: 10 }}
         >
           <h1
             className="font-serif leading-none mb-5"
@@ -194,40 +132,53 @@ export default function SplashPage() {
               fontSize: 'clamp(3.8rem,9.5vw,8rem)',
               color: '#ffffff',
               textShadow: '0 2px 28px rgba(0,20,80,0.55),0 4px 64px rgba(0,10,50,0.3)',
-              animation: mounted ? 'kd-fade-up 1s cubic-bezier(.22,1,.36,1) .15s both' : 'none',
-              opacity: mounted ? undefined : 0,
+              animation: mounted
+                ? 'kd-fade-up 1.1s cubic-bezier(0.16,1,0.3,1) 0.2s both'
+                : 'none',
+              opacity: 0,
             }}
           >
             K-Dive
           </h1>
 
+          {/* H3 — 16px */}
           <p
             className="font-mono mb-3"
             style={{
-              fontSize: 'clamp(.95rem,1.8vw,1.2rem)',
+              fontSize: 16,
               color: 'rgba(255,255,255,0.95)',
               textShadow: '0 1px 12px rgba(0,20,80,0.5)',
-              animation: mounted ? 'kd-fade-up 1s cubic-bezier(.22,1,.36,1) .65s both' : 'none',
-              opacity: mounted ? undefined : 0,
+              animation: mounted
+                ? 'kd-fade-up 1.1s cubic-bezier(0.16,1,0.3,1) 0.75s both'
+                : 'none',
+              opacity: 0,
             }}
           >
-            Start with your vibe,
+            Your Playlist, Your Guide to an Extraordinary Journey Through Korea
           </p>
 
+          {/* H4 — 12px */}
           <p
             style={{
-              fontSize: 'clamp(.82rem,1.1vw,.95rem)',
+              fontSize: 12,
               lineHeight: 1.85,
               color: 'rgba(255,255,255,0.82)',
-              maxWidth: 500,
+              maxWidth: 560,
               textShadow: '0 1px 8px rgba(0,15,70,0.4)',
-              animation: mounted ? 'kd-fade-up 1s cubic-bezier(.22,1,.36,1) 1.05s both' : 'none',
-              opacity: mounted ? undefined : 0,
+              animation: mounted
+                ? 'kd-fade-up 1.1s cubic-bezier(0.16,1,0.3,1) 1.2s both'
+                : 'none',
+              opacity: 0,
             }}
           >
-            K-Pop 음악에서 시작해 한국의 문화, 명소, 음식을 발견하는
+            Start with the K-Pop you love, and uncover Korea&apos;s culture, hidden gems,
+            and local flavors tailored just for you.
             <br />
-            새로운 방식의 한국 여행 큐레이션 플랫폼
+            Discover a Korea that is uniquely yours today.
+            <br />
+            <em style={{ fontStyle: 'italic', color: 'rgba(255,255,255,0.7)' }}>
+              &ldquo;Tell us what you love. We&apos;ll gift you the Korea you&apos;re bound to fall in love with.&rdquo;
+            </em>
           </p>
 
           <div
@@ -235,33 +186,32 @@ export default function SplashPage() {
             style={{
               width: 40, height: 3,
               background: 'rgba(255,255,255,0.6)',
-              animation: mounted ? 'kd-fade-up 1s cubic-bezier(.22,1,.36,1) 1.35s both' : 'none',
-              opacity: mounted ? undefined : 0,
+              animation: mounted
+                ? 'kd-fade-up 1.1s cubic-bezier(0.16,1,0.3,1) 1.6s both'
+                : 'none',
+              opacity: 0,
             }}
           />
         </div>
 
-        {/* ── 스크롤 화살표 ── */}
-        <button
-          type="button"
-          onClick={scrollDown}
-          aria-label="아래로 스크롤"
-          className="absolute border-0 bg-transparent cursor-pointer p-2"
+        {/* ── 스크롤 다운 인디케이터 ── */}
+        <div
+          className="absolute pointer-events-none"
           style={{
             bottom: 28, left: '50%', zIndex: 10,
-            animation: 'kd-arrow-bob 2.2s ease-in-out infinite',
+            animation: 'kd-bounce-down 2.2s ease-in-out infinite',
           }}
         >
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
             <path
               d="M4 8L12 16L20 8"
-              stroke="rgba(255,255,255,0.85)"
+              stroke="rgba(255,255,255,0.8)"
               strokeWidth="2"
               strokeLinecap="round"
               strokeLinejoin="round"
             />
           </svg>
-        </button>
+        </div>
       </section>
     </>
   );

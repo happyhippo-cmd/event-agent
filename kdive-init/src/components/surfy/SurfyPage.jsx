@@ -5,8 +5,8 @@ import SurfySidebar from './SurfySidebar';
 import SurfyChat from './SurfyChat';
 
 export default function SurfyPage() {
-  const { loggedIn, activeAppPage } = useKdive();
-  if (!loggedIn || activeAppPage !== 'surfy') return null;
+  const { loggedIn, activeAppPage, appPhase } = useKdive();
+  if (!loggedIn || appPhase !== 'app' || activeAppPage !== 'surfy') return null;
 
   return (
     <section

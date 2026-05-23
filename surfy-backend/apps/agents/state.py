@@ -172,6 +172,19 @@ class KDiveState(TypedDict):
     #   "suppressed": ["체인"],        ← 거부 키워드 (누적, 계속 기억)
     # }
 
+    # ===== 멀티턴 누적 키워드 컨텍스트 =====
+    # raw 발화 전체 대신 핵심 키워드만 카테고리별로 누적해서 보관한다.
+    # Supervisor가 매 턴 업데이트하고 다음 턴 키워드 추출 시 LLM 컨텍스트로 주입한다.
+    accumulated_keywords: NotRequired[dict]
+    # 구조 예시:
+    # {
+    #   "location":   ["홍대"],        ← 가장 최근 지역 (교체)
+    #   "mood":       ["조용한"],      ← 누적된 선호 분위기 (누적)
+    #   "place_type": ["카페"],        ← 가장 최근 장소 유형 (교체)
+    #   "food_type":  ["한식"],        ← 가장 최근 음식 유형 (교체)
+    #   "suppressed": ["체인"],        ← 거부 키워드 (누적, 계속 기억)
+    # }
+
     # ===== Supervisor intake 출력 =====
     target_agents: NotRequired[list[str]]                      # 라우팅할 에이전트 목록
     taste_context: NotRequired[TasteContext]                   # 통합 취향 객체

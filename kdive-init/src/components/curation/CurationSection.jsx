@@ -21,7 +21,7 @@ export default function CurationSection() {
     selectedPlaceIndex,
     setSelectedPlaceIndex,
     playerSlot,
-    loggedIn,
+    appPhase,
   } = useKdive();
   const fallbackPlaces = useMemo(() => getRecommendedPlaces(activeAlbum), [activeAlbum]);
   const shouldUseAgentPlaces = likedTrackIds.size >= MIN_TRACK_SELECTION;
@@ -32,7 +32,7 @@ export default function CurationSection() {
     if (selectedPlaceIndex >= places.length) setSelectedPlaceIndex(0);
   }, [places.length, selectedPlaceIndex, setSelectedPlaceIndex]);
 
-  if (loggedIn || !curationVisible || !activeAlbum) return null;
+  if (appPhase !== 'onboarding' || !curationVisible || !activeAlbum) return null;
 
   return (
     <section

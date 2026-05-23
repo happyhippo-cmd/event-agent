@@ -103,7 +103,7 @@ function getAvatarPalette(name) {
    MyPage 본체
 ───────────────────────────────────────────── */
 export default function MyPage() {
-  const { loggedIn, activeAppPage, likedTrackIds, likedPlaceKeys, likedFoodKeys } = useKdive();
+  const { loggedIn, activeAppPage, appPhase, currentUser, likedTrackIds, likedPlaceKeys, likedFoodKeys } = useKdive();
 
   // ── 프로필
   const [name, setName] = useState('');
@@ -133,12 +133,13 @@ export default function MyPage() {
   // ── 프로필 편집 모드
   const [editing, setEditing] = useState(false);
 
-  // localStorage 영속화
+  // localStorage 영속화 + currentUser 정보 반영
   useEffect(() => {
     if (typeof window === 'undefined') return;
     try {
       const saved = JSON.parse(localStorage.getItem('kdive-mypage') || '{}');
-      if (saved.name)      setName(saved.name);
+      // localStorage에 저장된 값 우선, 없으면 회원가입/로그인 정보로 채움
+      setName(saved.name || currentUser?.name || '');
       if (saved.nickname)  setNickname(saved.nickname);
       if (saved.contact)   setContact(saved.contact);
       if (saved.birthday)  setBirthday(saved.birthday);
@@ -149,7 +150,7 @@ export default function MyPage() {
       if (typeof saved.pushNotif === 'boolean')  setPushNotif(saved.pushNotif);
       if (typeof saved.marketingNotif === 'boolean') setMarketingNotif(saved.marketingNotif);
     } catch {}
-  }, []);
+  }, [currentUser]);
 
   const saveToStorage = () => {
     if (typeof window === 'undefined') return;
@@ -189,7 +190,7 @@ export default function MyPage() {
   const [bg, fg] = getAvatarPalette(nickname || name);
   const initials = (nickname || name || '?').slice(0, 2).toUpperCase();
 
-  if (!loggedIn || activeAppPage !== 'mypage') return null;
+  if (!loggedIn || appPhase !== 'app' || activeAppPage !== 'mypage') return null;
 
   return (
     <section
@@ -276,6 +277,13 @@ export default function MyPage() {
         <div>
           <SectionCard icon="👤" title="프로필 설정">
             <div className="flex flex-col">
+              {/* 이메일 — 읽기 전용 */}
+              {currentUser?.email && (
+                <div className="flex items-center gap-4 py-2">
+                  <span className="font-pretendard text-[13px] text-muted flex-shrink-0" style={{ minWidth: 72 }}>이메일</span>
+                  <span className="font-pretendard text-[13px] text-text">{currentUser.email}</span>
+                </div>
+              )}
               <InputField label="이름" value={name} onChange={setName} placeholder="이름 입력" />
               <InputField label="닉네임" value={nickname} onChange={setNickname} placeholder="닉네임 입력" />
               <InputField label="연락처" value={contact} onChange={setContact} type="tel" placeholder="010-0000-0000" />

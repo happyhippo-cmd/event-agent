@@ -1,36 +1,40 @@
 """
-Tour Worker Agent — entry node (v2)
-흐름: 자연어 입력 → [LLM] 위치+취향 추출 → DB 조회
-      DB 있으면 → DB 주변 검색 → [LLM] 선별 → [LLM] 큐레이션 → dict
-      DB 없으면 → Kakao API 검색 → [LLM] 선별 → [LLM] 큐레이션 → dict
-
-[LangSmith 트레이싱]
-.env 파일에 아래 값 추가:
-  LANGCHAIN_TRACING_V2=true
-  LANGCHAIN_API_KEY=발급받은_키
-  LANGCHAIN_PROJECT=tourism-agent
+Tour Worker Agent — entry node
+흐름: 자연어 입력 → [LLM] 위치+취향 추출 → DB/Kakao 검색
+      → [filter] 거리·카테고리 필터 + LLM 선별
+      → [curate] 취향 기반 큐레이션 카드 생성 → dict
 """
 
 from __future__ import annotations
 
 import math
 import os
-import math
 import sqlite3
 import json
 import requests
 from pathlib import Path
 from dotenv import load_dotenv
-from langsmith import traceable
-from langsmith.wrappers import wrap_openai
+
+try:
+    from langsmith import traceable
+    from langsmith.wrappers import wrap_openai
+except ImportError:
+    def traceable(**_kwargs):  # type: ignore[misc]
+        def decorator(fn):
+            return fn
+        return decorator
+    wrap_openai = lambda client: client  # noqa: E731
 
 from apps.agents.utils import haversine_km, topic_label
 from apps.agents.state import KDiveState, AGENT_TOURIST
+from .filter import rank_tour_places
+from .curate import curate_tour_items, check_visitability, build_card_text
 
 BASE_DIR = Path(__file__).resolve().parents[4]
 load_dotenv(BASE_DIR / ".env")
 
-DB_PATH       = os.getenv("TOURISM_DB_PATH", str(BASE_DIR / "data" / "filtered_merged_tourism.db"))
+_raw_db_path = os.getenv("TOURIST_DB_PATH", "data/filtered_merged_tourism_deduped.db")
+DB_PATH      = _raw_db_path if os.path.isabs(_raw_db_path) else str(BASE_DIR / _raw_db_path)
 KAKAO_API_KEY = os.getenv("KAKAO_REST_API_KEY")
 KAKAO_HEADERS = {"Authorization": f"KakaoAK {KAKAO_API_KEY}"}
 KAKAO_KW_URL  = "https://dapi.kakao.com/v2/local/search/keyword.json"
@@ -121,50 +125,6 @@ INTENT_SYSTEM_PROMPT = """
 - category_keywords는 실제 DB 카테고리에 포함된 문자열과 일치해야 합니다
 """.strip()
 
-RANKING_SYSTEM_PROMPT = """
-당신은 한국 관광지 추천 전문가입니다.
-사용자의 요청과 주변 관광지 목록을 바탕으로, 가장 적합한 장소를 선별하고 순위를 매기세요.
-
-반드시 아래 형식의 JSON만 반환하세요:
-{
-  "ranked_ids": ["id1", "id2", ...],
-  "reason": "선별 기준을 한국어로 간단히 설명"
-}
-
-규칙:
-- ranked_ids는 제공된 장소 목록의 ID만 사용하세요 (최대 5개)
-- 사용자의 선호에 얼마나 잘 맞는지를 기준으로 순서를 정하세요
-- 선호 정보가 없으면 카테고리 다양성과 거리를 기준으로 순위를 매기세요
-""".strip()
-
-CURATION_SYSTEM_PROMPT = """
-당신은 한국 관광지 전문 큐레이터입니다.
-장소 정보를 바탕으로 SNS 카드형 큐레이션 콘텐츠를 작성하세요.
-인스타그램 @daytripkorea 스타일처럼 감성적이고 유익한 문체로 작성합니다.
-
-반드시 아래 형식의 JSON 객체만 반환하세요:
-{
-  "curations": [
-    {
-      "id": "장소 ID (입력값 그대로)",
-      "headline": "장소의 핵심을 담은 한 줄 제목 (15자 내외)",
-      "description": "장소의 역사적·문화적 맥락과 매력을 5문장으로 서술 (300자 내외)",
-      "highlights": "핵심 포인트 3가지를 해시태그로 작성 (예: #역사적명소 #야경맛집 #가족나들이)",
-      "visit_tip": "방문 시 꼭 알아야 할 팁 또는 추천 포인트 (1문장)",
-      "operate_time": "운영시간 (예: 09:00~18:00, 없으면 빈 문자열)"
-    }
-  ]
-}
-
-규칙:
-- curations 배열에 제공된 장소 목록의 ID를 빠짐없이 포함하세요
-- description은 단순 설명이 아닌 스토리텔링 방식으로 작성하세요
-- highlights는 실제 overview·카테고리·운영 정보에서 도출하세요 (정보가 없으면 카테고리 기반으로 작성)
-- visit_tip은 계절·시간·방문 방법 등 실용적인 내용을 담으세요
-- operate_time은 입력된 usetime 값을 그대로 사용하세요 (없으면 빈 문자열)
-""".strip()
-
-
 # ── LLM ① : 위치 + 취향 구조화 추출 ─────────────────────────────────────────
 @traceable(name="extract_intent")
 def extract_intent_llm(user_message: str) -> dict:
@@ -178,76 +138,6 @@ def extract_intent_llm(user_message: str) -> dict:
         response_format={"type": "json_object"},
     )
     return json.loads(response.choices[0].message.content)
-
-
-# ── LLM ② : 후보 장소 선별·재정렬 ───────────────────────────────────────────
-@traceable(name="rank_places")
-def rank_places_llm(places: list[dict], user_message: str,
-                    preferences: list[str]) -> tuple[list[dict], str]:
-    summaries = [
-        {
-            "id": str(p["id"]),
-            "name": p["place_name"],
-            "category": p.get("category_name", ""),
-            "distance_km": p["distance_km"],
-            "overview": (p.get("overview") or "")[:120],
-        }
-        for p in places
-    ]
-    user_content = (
-        f"User request: {user_message}\n"
-        f"Preferences: {preferences}\n\n"
-        f"Nearby places:\n{json.dumps(summaries, ensure_ascii=False, indent=2)}"
-    )
-    response = _get_client().chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": RANKING_SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-        temperature=0,
-        response_format={"type": "json_object"},
-    )
-    result = json.loads(response.choices[0].message.content)
-    ranked_ids = result.get("ranked_ids", [])
-    reason = result.get("reason", "")
-    id_to_place = {str(p["id"]): p for p in places}
-    ranked = [id_to_place[rid] for rid in ranked_ids if rid in id_to_place]
-    return ranked, reason
-
-
-# ── LLM ③ : 큐레이션 카드 생성 ──────────────────────────────────────────────
-@traceable(name="curate_places")
-def curate_places_llm(places: list[dict], preferences: list[str]) -> dict[str, dict]:
-    summaries = [
-        {
-            "id": str(p.get("id", p.get("place_id", ""))),
-            "name": p["place_name"],
-            "category": p.get("category_name", ""),
-            "address": p.get("address", p.get("formatted_address", "")),
-            "overview": (p.get("overview") or "")[:300],
-            "usetime": p.get("usetime", ""),
-            "restdate": p.get("restdate", ""),
-            "distance_km": p.get("distance_km", ""),
-        }
-        for p in places
-    ]
-    user_content = (
-        f"사용자 취향: {preferences}\n\n"
-        f"장소 목록:\n{json.dumps(summaries, ensure_ascii=False, indent=2)}"
-    )
-    response = _get_client().chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": CURATION_SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-        temperature=0.4,
-        response_format={"type": "json_object"},
-    )
-    raw = json.loads(response.choices[0].message.content)
-    items = raw.get("curations", [])
-    return {str(item["id"]): item for item in items if "id" in item}
 
 
 # ── DB: 위치명으로 좌표 조회 ──────────────────────────────────────────────────
@@ -326,7 +216,7 @@ def search_nearby_from_db(latitude: float, longitude: float,
             record["distance_km"] = round(dist, 2)
             results.append(record)
 
-    results.sort(key=lambda r: r["distance_km"])
+    results.sort(key=lambda r: (0 if r.get("source") == "korea" else 1, r["distance_km"]))
     return results[:limit]
 
 
@@ -730,7 +620,7 @@ def _general_tour_response(
         f"{area or '서울'}을 처음 둘러볼 때 동선에 넣기 좋은 대표 명소를 우선으로 골랐어요."
         if ranked else "대표 명소 후보 없음"
     )
-    return {
+    result = {
         "current_location": area or "서울",
         "latitude": None, "longitude": None,
         "address": area or "서울",
@@ -741,12 +631,19 @@ def _general_tour_response(
         "query_type": "general_tour",
         "original_query": user_message,
     }
+    if not ranked:
+        result["message"] = "해당 관광지를 조회할 수 없습니다."
+    return result
 
 
 # ── Agent 진입점 ──────────────────────────────────────────────────────────────
 @traceable(name="tourism_agent_run")
-def run(user_message: str, radius_km: float = 3.0) -> dict:
-    """Tour agent entry node. Returns a dict with recommended_places + curation."""
+def run(user_message: str, radius_km: float = 3.0, sort_by: str = "preference") -> dict:
+    """Tour agent entry node. Returns a dict with recommended_places + curation.
+
+    sort_by: "preference" — LLM 취향 기반 선별 (기본값)
+             "distance"   — 거리 가까운 순 정렬
+    """
 
     # Step 1: LLM — 위치 + 취향 추출
     intent = extract_intent_llm(user_message)
@@ -786,17 +683,21 @@ def run(user_message: str, radius_km: float = 3.0) -> dict:
     candidates = [p for p in candidates if p["place_name"] != coord["place_name"]]
     candidates = enrich_korea_images(candidates)
 
-    # Step 5: LLM — 최적 장소 선별
+    # Step 5: filter — 최적 장소 선별·재정렬
     if candidates:
-        ranked, reason = rank_places_llm(candidates, user_message, preferences)
+        if sort_by == "distance":
+            ranked = sorted(candidates, key=lambda p: p.get("distance_km") or float("inf"))[:5]
+            reason = "거리 가까운 순 정렬"
+        else:
+            ranked, reason = rank_tour_places(candidates, user_message, preferences)
     else:
         ranked, reason = [], "후보 없음"
 
-    # Step 6: LLM — 큐레이션 카드 생성
+    # Step 6: curate — 큐레이션 카드 생성
     curation_map: dict[str, dict] = {}
     if ranked:
         try:
-            curation_map = curate_places_llm(ranked, preferences)
+            curation_map = curate_tour_items(ranked, preferences)
         except Exception:
             pass
 
@@ -815,9 +716,11 @@ def run(user_message: str, radius_km: float = 3.0) -> dict:
             curation["image_url"] = place["firstimage"]
         if place.get("firstimage2"):
             curation["image_url_2"] = place["firstimage2"]
+        curation.update(check_visitability(place.get("usetime") or "", place.get("distance_km")))
+        curation["card_text"] = build_card_text(curation)
         place["curation"] = curation
 
-    return {
+    result = {
         "current_location": coord["place_name"],
         "latitude": lat,
         "longitude": lon,
@@ -827,6 +730,51 @@ def run(user_message: str, radius_km: float = 3.0) -> dict:
         "llm_selection_reason": reason,
         "recommended_places": ranked,
     }
+    if not ranked:
+        result["message"] = "해당 관광지를 조회할 수 없습니다."
+    return result
+
+
+@traceable(name="tourism_agent_run")
+def run_agent(
+    user_message: str,
+    radius_km: float = 3.0,
+    user_lat: float | None = None,
+    user_lng: float | None = None,
+    taste_context: dict | None = None,
+    sort_by: str = "preference",
+) -> str:
+    """Tour agent 진입점. str JSON을 반환한다 (reference run_agent 시그니처 호환).
+
+    taste_context에 location_keywords가 있으면 첫 번째 키워드를 위치로 우선 사용.
+    """
+    if taste_context:
+        location_keywords = taste_context.get("location_keywords") or []
+        if location_keywords:
+            user_message = location_keywords[0]
+
+    result = run(user_message=user_message, radius_km=radius_km, sort_by=sort_by)
+    if result.get("error"):
+        return json.dumps({"error": result["error"]}, ensure_ascii=False)
+
+    # 사용자 실제 좌표가 있으면 장소까지의 도보 시간·방문 가능 여부를 사용자 위치 기준으로 보정
+    if user_lat is not None and user_lng is not None:
+        for place in result.get("recommended_places") or []:
+            try:
+                user_dist_km = haversine_km(
+                    user_lat, user_lng, float(place["y"]), float(place["x"])
+                )
+                walk_min = max(1, round(user_dist_km / 4.0 * 60))
+                curation = place.get("curation") or {}
+                curation["walk_minutes"] = walk_min
+                curation.update(
+                    check_visitability(place.get("usetime") or "", user_dist_km)
+                )
+                curation["card_text"] = build_card_text(curation)
+            except (TypeError, ValueError):
+                pass
+
+    return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 def run_tour_agent_for_state(state: KDiveState, radius_km: float = 3.0) -> KDiveState:
@@ -834,10 +782,6 @@ def run_tour_agent_for_state(state: KDiveState, radius_km: float = 3.0) -> KDive
     if AGENT_TOURIST not in (state.get("target_agents") or []):
         return state
 
-    # travel_phase에 따라 검색 반경 조정
-    # - during_trip : 지금 이동 중 → 가까운 곳 위주 (1.5km)
-    # - pre_trip    : 여행 계획 중 → 더 넓은 범위 탐색 (5.0km)
-    # - unknown     : 기본값 유지 (3.0km)
     travel_phase = state.get("travel_phase", "unknown")
     if travel_phase == "during_trip":
         radius_km = 1.5
@@ -846,8 +790,13 @@ def run_tour_agent_for_state(state: KDiveState, radius_km: float = 3.0) -> KDive
 
     agent_contexts = state.get("agent_taste_contexts") or {}
     taste = agent_contexts.get(AGENT_TOURIST) or state.get("taste_context") or {}
-    location_keywords = taste.get("location_keywords") or []
-    user_message = location_keywords[0] if location_keywords else state["user_utterance"]
+    sort_by = state.get("tour_sort_by", "preference")
 
-    state["tourist_result"] = run(user_message=user_message, radius_km=radius_km)
+    raw_json = run_agent(
+        user_message=state["user_utterance"],
+        radius_km=radius_km,
+        taste_context=taste,
+        sort_by=sort_by,
+    )
+    state["tourist_result"] = json.loads(raw_json)
     return state

@@ -1,5 +1,6 @@
 """
 python manage.py import_events --file ../../데이포유/popup_stores.csv
+python manage.py import_events --file ../../야놀자/yanolja_concerts.csv --source yanolja
 """
 
 import csv
@@ -47,7 +48,8 @@ class Command(BaseCommand):
     help = '팝업스토어 CSV 데이터를 Event 모델에 임포트'
 
     def add_arguments(self, parser):
-        parser.add_argument('--file', required=True, help='popup_stores.csv 경로')
+        parser.add_argument('--file', required=True, help='CSV 경로')
+        parser.add_argument('--source', default='dayforyou', help='데이터 출처 (dayforyou / yanolja 등)')
         parser.add_argument('--clear', action='store_true', help='임포트 전 기존 데이터 삭제')
 
     def handle(self, *args, **options):
@@ -55,8 +57,10 @@ class Command(BaseCommand):
         if not csv_path.exists():
             raise CommandError(f'파일을 찾을 수 없습니다: {csv_path}')
 
+        source = options['source']
+
         if options['clear']:
-            deleted, _ = Event.objects.filter(source='dayforyou').delete()
+            deleted, _ = Event.objects.filter(source=source).delete()
             self.stdout.write(f'기존 데이터 {deleted}개 삭제')
 
         created = updated = skipped = 0
@@ -69,7 +73,7 @@ class Command(BaseCommand):
 
         with transaction.atomic():
             for row in rows:
-                source_id = row.get('seq', '').strip()
+                source_id = (row.get('seq') or row.get('source_id') or '').strip()
                 if not source_id:
                     skipped += 1
                     continue
@@ -105,10 +109,11 @@ class Command(BaseCommand):
                     'new_mood_tags': parse_hashtags(row.get('new_mood_tags', [])),
                     'new_audience_tags': parse_hashtags(row.get('new_audience_tags', [])),
                     'vector_summary_v2': row.get('vector_summary_v2', '').strip(),
+                    'store_url': row.get('store_url', '').strip()[:1000],
                 }
 
                 _, was_created = Event.objects.update_or_create(
-                    source='dayforyou',
+                    source=source,
                     source_id=source_id,
                     defaults=defaults,
                 )
